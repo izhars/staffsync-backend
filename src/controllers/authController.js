@@ -457,60 +457,33 @@ exports.updateProfile = async (req, res) => {
 // @access  Private
 exports.updateProfilePicture = async (req, res) => {
   try {
-    console.log('📸 Update profile picture called');
 
     // 1️⃣ File validation
     if (!req.file) {
-      console.log('❌ No file received');
       return res.status(400).json({ success: false, message: 'No file uploaded' });
     }
 
-    console.log('📁 File info:', {
-      originalName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      size: req.file.size
-    });
-
     if (!req.file.mimetype.startsWith('image/')) {
-      console.log('❌ Invalid file type:', req.file.mimetype);
       return res.status(400).json({
         success: false,
         message: 'Only image files are allowed'
       });
     }
 
-    // 2️⃣ Upload new image
-    console.log('⬆️ Uploading image to Cloudinary...');
     const result = await uploadToCloudinary(req.file.buffer, 'profile');
-
-    console.log('✅ Upload success:', {
-      url: result.url,
-      publicId: result.publicId
-    });
-
-    // 3️⃣ Fetch user
-    console.log('🔍 Fetching user:', req.user.id);
     const user = await User.findById(req.user.id);
 
     if (!user) {
-      console.log('❌ User not found');
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    console.log('👤 Current user image:', {
-      profilePicture: user.profilePicture,
-      profilePicturePublicId: user.profilePicturePublicId
-    });
-
     // 4️⃣ Delete old image (if exists)
     if (user.profilePicturePublicId) {
-      console.log('🗑️ Deleting old image from Cloudinary:', user.profilePicturePublicId);
 
       const deleteRes = await deleteFromCloudinary(
         user.profilePicturePublicId
       );
 
-      console.log('🧨 Cloudinary delete response:', deleteRes);
     } else {
       console.log('ℹ️ No old profile picture to delete');
     }
@@ -520,8 +493,6 @@ exports.updateProfilePicture = async (req, res) => {
     user.profilePicturePublicId = result.publicId;
 
     await user.save({ validateBeforeSave: false });
-
-    console.log('💾 User updated successfully');
 
     res.status(200).json({
       success: true,
@@ -712,12 +683,6 @@ exports.checkVerification = async (req, res) => {
     const incomingDeviceId = req.headers['device-id'] || req.body.deviceId;
     const userId = req.user.id;
 
-    console.log('📥 [VERIFY] Incoming data:', {
-      userId,
-      incomingDeviceId,
-      ip: req.ip
-    });
-
     // Validation
     if (!incomingDeviceId) {
       console.warn('⚠️ [VERIFY] Missing device ID');
@@ -813,7 +778,6 @@ exports.checkVerification = async (req, res) => {
         });
       }
     } else {
-      console.log('🆕 [VERIFY] First login detected, saving device info');
 
       await User.findByIdAndUpdate(userId, {
         $set: {
@@ -837,8 +801,6 @@ exports.checkVerification = async (req, res) => {
       $set: { lastActivity: new Date() },
       $inc: { loginAttempts: -1 }
     });
-
-    console.log('✅ [VERIFY] User verified successfully:', userId);
 
     return res.status(200).json({
       success: true,

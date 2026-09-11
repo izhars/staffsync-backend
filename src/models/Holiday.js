@@ -52,15 +52,12 @@ HolidaySchema.index({ type: 1 });
 // ✅ Pre-save hook to set weekday
 HolidaySchema.pre('save', function(next) {
   const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-  const dayName = days[this.date.getDay()];
 
-  // If it's Sunday, cancel save
-  if (dayName === 'Sunday') {
-    const err = new Error('Holidays cannot be on Sunday');
-    return next(err);
+  if (this.date) {
+    this.date.setHours(0, 0, 0, 0);   // Normalize date
+    this.weekday = days[this.date.getDay()];
   }
 
-  this.weekday = dayName;
   next();
 });
 

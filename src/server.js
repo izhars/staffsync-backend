@@ -57,6 +57,7 @@ const employeeInteractionRoutes = require('./routes/employeeInteractionRoutes');
 const face = require('./routes/faceRecognitionRoutes');
 const rfidRoutes = require('./routes/rfidRoutes'); // RFID routes
 const numberPlateRoutes = require('./routes/numberPlateRoutes');
+const geoFenceRoutes = require('./routes/geoFence');
 
 // Initialize Express app
 const app = express();
@@ -79,6 +80,7 @@ app.use(
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:3001",
+  "http://localhost:3002",
   process.env.CLIENT_URL
 ].filter(Boolean);
 
@@ -91,7 +93,21 @@ app.use(
         return callback(null, true);
       }
 
-      console.log("❌ Blocked by CORS:", origin);
+      callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true
+  })
+);
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
       callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
@@ -150,6 +166,7 @@ app.use('/api/employee-interactions', employeeInteractionRoutes);
 app.use('/api/face', face); // Face recognition routes
 app.use('/api/rfid-scans', rfidRoutes); // RFID scan routes
 app.use('/api/plate', numberPlateRoutes);
+app.use('/api/geo-fence', geoFenceRoutes);
 
 // Add a debug endpoint
 app.get('/api/debug/socket-status', (req, res) => {

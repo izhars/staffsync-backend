@@ -2,23 +2,19 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const path = require('path');
-
-// Load environment variables from root
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
-
-// Import models from src folder
 const User = require('../models/User');
 const Department = require('../models/Department');
 
 // Employee Data
 const employeeData = {
   employeeId: 'EMP001',
-  firstName: 'John',
-  lastName: 'Doe',
-  email: 'john.doe@company.com',
+  firstName: 'Sharique',
+  lastName: 'Izhar',
+  email: 'sharique.izhar@staffsync.com',
   password: 'Emp@123456',
   role: 'employee',
-  department: 'Engineering',
+  department: 'Information Technology',
   designation: 'Software Developer',
   phone: '9876543211',
   gender: 'male',
@@ -45,7 +41,7 @@ const employeeData = {
     accountNumber: '1234567890',
     bankName: 'HDFC Bank',
     ifscCode: 'HDFC0001234',
-    accountHolderName: 'John Doe'
+    accountHolderName: 'Sharique Izhar'
   },
   panNumber: 'ABCDE1234F',
   pfNumber: 'MH123456789',

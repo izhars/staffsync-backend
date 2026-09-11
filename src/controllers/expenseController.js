@@ -14,13 +14,8 @@ const {
 // CREATE EXPENSE (Draft by default) - UPDATED
 exports.createExpense = async (req, res, next) => {
     try {
-        console.log('[CreateExpense] Incoming request body:', req.body);
-        console.log('[CreateExpense] Logged-in user ID:', req.user.id);
-        console.log('[CreateExpense] Request file:', req.file);
-
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            console.log('[CreateExpense] Validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
 
@@ -46,13 +41,11 @@ exports.createExpense = async (req, res, next) => {
         let receiptPublicId = null;
 
         if (req.file) {
-            console.log('[CreateExpense] Uploading to Cloudinary:', req.file);
             try {
                 // ✅ USE THE SPECIALIZED FUNCTION
                 const uploadResult = await uploadExpenseFile(req.file.buffer);
                 receiptUrl = uploadResult.url;
                 receiptPublicId = uploadResult.publicId;
-                console.log('[CreateExpense] Cloudinary upload successful:', uploadResult);
             } catch (uploadError) {
                 console.error('[CreateExpense] Cloudinary upload failed:', uploadError);
                 throw new AppError('Failed to upload receipt to cloud storage', 500);
@@ -68,12 +61,8 @@ exports.createExpense = async (req, res, next) => {
             status: 'draft'
         };
 
-        console.log('[CreateExpense] Creating expense with data:', expenseData);
-
         const expense = new Expense(expenseData);
         await expense.save();
-
-        console.log('[CreateExpense] Expense created successfully:', expense);
 
         res.status(201).json({
             success: true,
@@ -90,12 +79,9 @@ exports.createExpense = async (req, res, next) => {
 // UPDATE EXPENSE (Only if draft) - WITH CLOUDINARY CLEANUP
 exports.updateExpense = async (req, res, next) => {
     try {
-        console.log('[UpdateExpense] Incoming request body:', req.body);
-        console.log('[UpdateExpense] Request file:', req.file);
 
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            console.log('[UpdateExpense] Validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
 
@@ -105,12 +91,10 @@ exports.updateExpense = async (req, res, next) => {
         });
 
         if (!expense) {
-            console.log('[UpdateExpense] Expense not found with ID:', req.params.id);
             throw new AppError('Expense not found', 404);
         }
 
         if (expense.status !== 'draft') {
-            console.log('[UpdateExpense] Expense status is not draft:', expense.status);
             throw new AppError('Can only update draft expenses', 400);
         }
 
@@ -119,14 +103,11 @@ exports.updateExpense = async (req, res, next) => {
         let receiptPublicId = expense.receiptPublicId;
 
         if (req.file) {
-            console.log('[UpdateExpense] New file received, uploading to Cloudinary');
 
             // Delete old receipt from Cloudinary if it exists
             if (receiptPublicId) {
                 try {
-                    console.log('[UpdateExpense] Deleting old receipt from Cloudinary:', receiptPublicId);
                     await deleteFromCloudinary(receiptPublicId);
-                    console.log('[UpdateExpense] Old receipt deleted successfully');
                 } catch (deleteError) {
                     console.error('[UpdateExpense] Failed to delete old receipt from Cloudinary:', deleteError);
                     // Don't throw error here, just log it
@@ -134,13 +115,9 @@ exports.updateExpense = async (req, res, next) => {
             }
 
             try {
-                // ✅ USE THE SPECIALIZED FUNCTION
-                console.log('[UpdateExpense] Uploading new file to Cloudinary...');
                 const uploadResult = await uploadExpenseFile(req.file.buffer);
                 receiptUrl = uploadResult.url;
                 receiptPublicId = uploadResult.publicId;
-                console.log('[UpdateExpense] Cloudinary upload successful. New URL:', uploadResult.url);
-                console.log('[UpdateExpense] New public_id:', receiptPublicId);
             } catch (uploadError) {
                 console.error('[UpdateExpense] Cloudinary upload failed:', uploadError);
                 throw new AppError('Failed to upload receipt to cloud storage', 500);
@@ -156,8 +133,6 @@ exports.updateExpense = async (req, res, next) => {
             receiptPublicId: receiptPublicId
         };
 
-        console.log('[UpdateExpense] Updating expense with data:', updateData);
-
         Object.keys(updateData).forEach(key => {
             if (updateData[key] !== undefined) {
                 expense[key] = updateData[key];
@@ -165,8 +140,6 @@ exports.updateExpense = async (req, res, next) => {
         });
 
         await expense.save();
-
-        console.log('[UpdateExpense] Expense updated successfully');
 
         res.json({
             success: true,
@@ -183,7 +156,6 @@ exports.updateExpense = async (req, res, next) => {
 // DELETE EXPENSE (Only if draft) - WITH CLOUDINARY CLEANUP
 exports.deleteExpense = async (req, res, next) => {
     try {
-        console.log('[DeleteExpense] Deleting expense ID:', req.params.id);
 
         const expense = await Expense.findOne({
             _id: req.params.id,
@@ -191,21 +163,17 @@ exports.deleteExpense = async (req, res, next) => {
         });
 
         if (!expense) {
-            console.log('[DeleteExpense] Expense not found');
             throw new AppError('Expense not found', 404);
         }
 
         if (expense.status !== 'draft') {
-            console.log('[DeleteExpense] Expense status is not draft:', expense.status);
             throw new AppError('Can only delete draft expenses', 400);
         }
 
         // Delete from Cloudinary if receipt exists
         if (expense.receiptPublicId) {
             try {
-                console.log('[DeleteExpense] Deleting receipt from Cloudinary:', expense.receiptPublicId);
                 await deleteFromCloudinary(expense.receiptPublicId);
-                console.log('[DeleteExpense] Cloudinary deletion successful');
             } catch (cloudinaryError) {
                 console.error('[DeleteExpense] Failed to delete from Cloudinary:', cloudinaryError);
                 // Continue with deletion even if Cloudinary fails
@@ -213,9 +181,6 @@ exports.deleteExpense = async (req, res, next) => {
         }
 
         await expense.deleteOne();
-
-        console.log('[DeleteExpense] Expense deleted successfully');
-
         res.json({
             success: true,
             message: 'Expense deleted successfully'

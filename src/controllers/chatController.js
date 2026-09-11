@@ -134,13 +134,9 @@ exports.getConversationMessages = async (req, res) => {
 // Create new group conversation
 exports.createGroupConversation = async (req, res) => {
   try {
-    console.log('🟢 [CREATE GROUP] Request received');
 
     const { name, description, participantIds = [], settings } = req.body;
     const userId = req.user.id;
-
-    console.log('👤 Creator ID:', userId);
-    console.log('📥 Payload:', { name, description, participantIds, settings });
 
     if (!name) {
       console.warn('⚠️ Group name missing');
@@ -155,7 +151,6 @@ exports.createGroupConversation = async (req, res) => {
     let avatarPublicId = '';
 
     if (req.file) {
-      console.log('🖼️ Avatar file detected:', req.file.originalname);
 
       try {
         const uploadResult = await uploadGroupAvatar(req.file.buffer, {
@@ -166,7 +161,6 @@ exports.createGroupConversation = async (req, res) => {
         avatarUrl = uploadResult.url;
         avatarPublicId = uploadResult.publicId;
 
-        console.log('✅ Avatar uploaded:', avatarUrl);
       } catch (uploadError) {
         console.error('❌ Avatar upload failed:', uploadError);
         return res.status(500).json({
@@ -182,10 +176,7 @@ exports.createGroupConversation = async (req, res) => {
       ...new Set(participantIds.filter(id => id && id !== userId.toString()))
     ];
 
-    console.log('👥 Final participant IDs:', allParticipantIds);
-
     const users = await User.find({ _id: { $in: allParticipantIds } });
-    console.log(`🔍 Users found: ${users.length}/${allParticipantIds.length}`);
 
     if (users.length !== allParticipantIds.length) {
       console.error('❌ One or more participants not found');
@@ -220,14 +211,10 @@ exports.createGroupConversation = async (req, res) => {
       createdBy: userId
     });
 
-    console.log('💾 Saving group to DB...');
     await group.save();
-    console.log('✅ Group saved:', group._id);
 
     const populatedGroup = await Conversation.findById(group._id)
       .populate('participants.user', 'firstName lastName email role profilePicture');
-
-    console.log('📦 Group populated and ready to ship');
 
     res.status(201).json({
       success: true,
@@ -274,7 +261,6 @@ exports.updateGroupAvatar = async (req, res) => {
     if (group.avatar && group.avatar.publicId) {
       try {
         await deleteFromCloudinary(group.avatar.publicId);
-        console.log('🗑️ Old avatar deleted:', group.avatar.publicId);
       } catch (deleteError) {
         console.warn('⚠️ Failed to delete old avatar:', deleteError);
         // Continue with upload even if delete fails
@@ -340,7 +326,6 @@ exports.removeGroupAvatar = async (req, res) => {
     // Delete from Cloudinary
     try {
       await deleteFromCloudinary(group.avatar.publicId);
-      console.log('🗑️ Avatar deleted from Cloudinary:', group.avatar.publicId);
     } catch (deleteError) {
       console.warn('⚠️ Failed to delete avatar from Cloudinary:', deleteError);
     }
@@ -674,45 +659,29 @@ exports.search = async (req, res) => {
 };
 // Get unread message count
 exports.getUnreadCount = async (req, res) => {
-  console.log('🟡 [UnreadCount] API hit');
 
   try {
-    console.log('🟡 req.user:', req.user);
-
     const userId = req.user?.id;
-
     if (!userId) {
-      console.log('🔴 userId missing from req.user');
       return res.status(401).json({
         success: false,
         message: 'Unauthorized: userId missing'
       });
     }
 
-    console.log('🟢 userId:', userId);
-
-    console.log('🟡 Querying conversations...');
     const conversations = await Conversation.find({
       'participants.user': userId,
       'participants.isActive': true,
       isArchived: false
     });
 
-    console.log('🟢 Conversations found:', conversations.length);
-
     conversations.forEach((c, i) => {
-      console.log(`📨 Conversation ${i + 1}:`, {
-        id: c._id,
-        unreadCount: c.unreadCount
-      });
     });
 
     const totalUnread = conversations.reduce(
       (sum, conv) => sum + (conv.unreadCount || 0),
       0
     );
-
-    console.log('🟢 Total unread:', totalUnread);
 
     res.json({
       success: true,

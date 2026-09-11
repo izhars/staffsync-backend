@@ -1,73 +1,98 @@
 const mongoose = require('mongoose');
-const moment = require('moment-timezone'); // Add this import
+const moment = require('moment-timezone');
 
-const attendanceSchema = new mongoose.Schema({
-  employee: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
+const locationSubSchema = new mongoose.Schema(
+  {
+    latitude: Number,
+    longitude: Number,
+    address: String,
+    matchedLocationName: String,
+    distanceFromOffice: Number,
   },
-  date: { type: Date, required: true },
+  { _id: false }
+);
 
-  checkIn: {
+const punchSubSchema = new mongoose.Schema(
+  {
     time: { type: Date, default: null },
-    location: {
-      latitude: Number,
-      longitude: Number,
-      address: String
+    location: { type: locationSubSchema, default: {} },
+    deviceInfo: String,
+
+    // ── NEW audit fields ─────────────────────────────────────────────
+    punchedFrom: {
+      type: String,
+      enum: ['mobile', 'desktop'],
+      default: 'mobile',
     },
-    deviceInfo: String
-  },
-
-  checkOut: {
-    time: { type: Date, default: null },
-    location: {
-      latitude: Number,
-      longitude: Number,
-      address: String
+    verificationMethod: {
+      type: String,
+      enum: [
+        'GPS',                     // normal mobile GPS inside fence
+        'OFFICE_NETWORK',          // HR/Admin desktop on office IP
+        'BYPASS_PRIVILEGED',       // HR/Admin with GPS but outside fence
+        'BYPASS_NO_GPS_PRIVILEGED' // HR/Admin desktop, IP check skipped (dev/staging)
+      ],
+      default: 'GPS',
     },
-    deviceInfo: String
+    isGpsBypassed: { type: Boolean, default: false },
+    bypassReason: String,
+    clientIp: String,
   },
+  { _id: false }
+);
 
-  isShortAttendance: { type: Boolean, default: false },
-  shortByMinutes:    { type: Number, default: 0 },
+const attendanceSchema = new mongoose.Schema(
+  {
+    employee: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+    },
+    date: { type: Date, required: true },
 
-  workHours: { type: Number, default: 0 },
-  status: {
-    type: String,
-    enum: [
-      'present',
-      'absent',
-      'half-day',
-      'on-leave',
-      'public-holiday',
-      'combo-off',
-      'non-working-day'
-    ],
-    default: 'absent'
+    checkIn: { type: punchSubSchema, default: {} },
+    checkOut: { type: punchSubSchema, default: {} },
+
+    isShortAttendance: { type: Boolean, default: false },
+    shortByMinutes: { type: Number, default: 0 },
+
+    workHours: { type: Number, default: 0 },
+    status: {
+      type: String,
+      enum: [
+        'present',
+        'absent',
+        'half-day',
+        'on-leave',
+        'public-holiday',
+        'combo-off',
+        'non-working-day',
+      ],
+      default: 'absent',
+    },
+
+    isLate: { type: Boolean, default: false },
+    lateBy: { type: Number, default: 0 },
+    remarks: String,
+    approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
+  { timestamps: true }
+);
 
-  isLate: { type: Boolean, default: false },
-  lateBy: { type: Number, default: 0 },
-  remarks: String,
-  approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
-}, {
-  timestamps: true
-});
-
-// Compound index for employee + date queries
 attendanceSchema.index({ employee: 1, date: 1 }, { unique: true });
 
-// Virtual for formatted times
 attendanceSchema.virtual('checkInTimeFormatted').get(function () {
-  return this.checkIn?.time ? moment(this.checkIn.time).tz('Asia/Kolkata').format('YYYY-MM-DD HH:mm:ss') : null;
+  return this.checkIn?.time
+    ? moment(this.checkIn.time).tz('Asia/Kolkata').format('YYYY-MM-DD HH:mm:ss')
+    : null;
 });
 
 attendanceSchema.virtual('checkOutTimeFormatted').get(function () {
-  return this.checkOut?.time ? moment(this.checkOut.time).tz('Asia/Kolkata').format('YYYY-MM-DD HH:mm:ss') : null;
+  return this.checkOut?.time
+    ? moment(this.checkOut.time).tz('Asia/Kolkata').format('YYYY-MM-DD HH:mm:ss')
+    : null;
 });
 
-// Ensure virtuals are included in toJSON
 attendanceSchema.set('toJSON', { virtuals: true });
 attendanceSchema.set('toObject', { virtuals: true });
 

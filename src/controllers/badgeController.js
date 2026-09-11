@@ -6,24 +6,12 @@ exports.createBadge = async (req, res) => {
   try {
     const { name, description } = req.body;
 
-    console.log('Request body:', req.body);
-    console.log('Request file exists:', !!req.file);
-
     if (!req.file) {
       return res.status(400).json({ 
         success: false, 
         message: 'Please upload a badge image' 
       });
     }
-
-    // Log file details
-    console.log('File details:', {
-      originalname: req.file.originalname,
-      mimetype: req.file.mimetype,
-      size: req.file.size,
-      hasBuffer: !!req.file.buffer,
-      bufferLength: req.file.buffer ? req.file.buffer.length : 0
-    });
 
     // Upload buffer to Cloudinary
     let cloudinaryResult;
@@ -32,7 +20,6 @@ exports.createBadge = async (req, res) => {
         folder: 'badges',
         resource_type: 'image'
       });
-      console.log('Cloudinary upload successful:', cloudinaryResult);
     } catch (cloudinaryError) {
       console.error('Cloudinary upload error:', cloudinaryError);
       return res.status(500).json({ 
@@ -101,7 +88,6 @@ exports.deleteBadge = async (req, res) => {
     if (badge.cloudinaryId) {
       try {
         await deleteFromCloudinary(badge.cloudinaryId);
-        console.log('Deleted from Cloudinary:', badge.cloudinaryId);
       } catch (cloudinaryError) {
         console.error('Failed to delete from Cloudinary:', cloudinaryError);
         // Continue with DB deletion even if Cloudinary fails

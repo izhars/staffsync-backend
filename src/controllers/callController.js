@@ -46,8 +46,6 @@ async function startCall(req, res) {
       status: 'ringing',
     });
 
-    console.log(`💾 ${type.toUpperCase()} Call saved: ${call._id}`);
-
     const caller = await User.findById(callerId).select('firstName lastName');
     const callerName = caller?.fullName || 'Unknown';
 
@@ -115,12 +113,6 @@ async function acceptCall(req, res) {
     call.status = 'accepted';
     await call.save();
 
-    console.log('✅ [acceptCall] Call accepted:', {
-      callId,
-      calleeId: userId,
-      calleeName
-    });
-
     // Only notify the caller (the other party)
     const payload = {
       title: 'Call Accepted',
@@ -166,8 +158,6 @@ async function declineCall(req, res) {
   try {
     const userId = req.user.id;
     const { callId, reason = 'user_declined' } = req.body;
-
-    console.log('📞 [declineCall] REQUEST:', { callId, userId, reason });
 
     const call = await Call.findOne({ callId });
     if (!call) {
@@ -265,9 +255,7 @@ async function endCall(req, res) {
     call.endedAt = new Date();
     call.duration = Math.floor((call.endedAt - call.createdAt) / 1000);
     await call.save();
-
-    console.log(`📴 Call ${callId} ended by ${userId}`);
-
+    
     const user = await User.findById(userId).select('firstName lastName');
     const userName = user?.fullName || 'Unknown';
 

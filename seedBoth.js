@@ -2,8 +2,6 @@
 const { exec } = require('child_process');
 const path = require('path');
 
-console.log('🌱 Starting to seed both HR and Employee users...\n');
-
 // Run HR seed
 exec('node seedHr.js', (error, stdout, stderr) => {
   if (error) {

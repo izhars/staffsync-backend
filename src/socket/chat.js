@@ -269,6 +269,88 @@ const initChat = (io) => {
             }
         });
 
+        /* ==================== CHAT HISTORY (per-user, paginated) ==================== */
+
+        socket.on('load-history', async ({ targetUserId, page = 1, limit = 50 } = {}) => {
+            const requesterId = socket.user.id;
+
+            try {
+                if (!targetUserId) {
+                    return socket.emit('error', {
+                        type: 'LOAD_HISTORY_FAILED',
+                        message: 'targetUserId is required',
+                    });
+                }
+
+                // 1. Find (or create) the direct conversation between the two users
+                let conversation = await Conversation.findOne({
+                    type: 'direct',
+                    participants: {
+                        $all: [
+                            { $elemMatch: { user: requesterId } },
+                            { $elemMatch: { user: targetUserId } },
+                        ],
+                    },
+                }).select('_id');
+
+                if (!conversation) {
+                    // No conversation yet → return empty page, but tell client to stop paginating
+                    return socket.emit('chat-history', {
+                        targetUserId,
+                        messages: [],
+                        page,
+                        limit,
+                        hasMore: false,
+                        timestamp: new Date().toISOString(),
+                    });
+                }
+
+                // 2. Fetch page of messages, newest-first so page 1 = most recent
+                const skip = Math.max(0, (page - 1) * limit);
+
+                // IMPORTANT: sort DESC here, then reverse before sending.
+                // This way page 1 = latest 50, page 2 = previous 50, etc.
+                const raw = await Message.find({ conversationId: conversation._id })
+                    .sort({ timestamp: -1 })
+                    .skip(skip)
+                    .limit(limit + 1) // +1 to detect hasMore
+                    .lean();
+
+                const hasMore = raw.length > limit;
+                const pageSlice = hasMore ? raw.slice(0, limit) : raw;
+
+                // Reverse to chronological order (oldest → newest) for the UI
+                const chronological = pageSlice.reverse();
+
+                // 3. Format using your existing helper
+                const messages = chronological.map((m) => ({
+                    ...formatMessage(m),
+                    // client expects `_id` and `fromRole` — add them
+                    _id: m._id.toString(),
+                    fromRole: m.senderRole,
+                    to: m.to?.toString(),
+                    from: m.sender?.toString(),
+                    readAt: m.readAt || null,
+                }));
+
+                socket.emit('chat-history', {
+                    targetUserId,
+                    messages,
+                    page,
+                    limit,
+                    hasMore,
+                    timestamp: new Date().toISOString(),
+                });
+            } catch (err) {
+                console.error('💥 load-history error:', err);
+                socket.emit('error', {
+                    type: 'LOAD_HISTORY_FAILED',
+                    message: 'Failed to load chat history',
+                    error: err.message,
+                });
+            }
+        });
+
         // ==================== CONNECTION TESTING ====================
 
         socket.on('test-connection', ({ targetUserId }) => {
@@ -339,8 +421,29 @@ const initChat = (io) => {
 
                 let attachmentData = null;
 
-                // Handle image upload if attachment is provided
-                if (attachment && attachment.type === 'image' && attachment.base64) {
+                // ============================================================
+                // ATTACHMENT HANDLING
+                // ============================================================
+                // Case 1: Pre-uploaded via HTTP (PREFERRED — frontend already
+                //         sent file to Cloudinary and got back url + publicId)
+                // ============================================================
+                if (attachment && attachment.url && attachment.publicId) {
+                    attachmentData = {
+                        type: attachment.type || 'file',
+                        url: attachment.url,
+                        publicId: attachment.publicId,
+                        width: attachment.width || null,
+                        height: attachment.height || null,
+                        size: attachment.size || 0,
+                        filename: attachment.filename || attachment.fileName || `file_${Date.now()}`,
+                        mimeType: attachment.mimeType || 'application/octet-stream'
+                    };
+                    console.log('📎 Using pre-uploaded attachment:', attachmentData.url);
+                }
+                // ============================================================
+                // Case 2: Base64 image needs uploading (legacy fallback)
+                // ============================================================
+                else if (attachment && attachment.type === 'image' && attachment.base64) {
                     try {
                         console.log(`📤 ${fullName} uploading image for ${toUserId}`);
                         const uploadResult = await uploadBase64ToCloudinary(attachment.base64, {
@@ -400,13 +503,24 @@ const initChat = (io) => {
                     });
                 }
 
+                // ============================================================
+                // Determine message type based on attachment
+                // ============================================================
+                let resolvedMessageType = 'text';
+                if (attachmentData) {
+                    if (attachmentData.type === 'image') resolvedMessageType = 'image';
+                    else if (attachmentData.type === 'video') resolvedMessageType = 'video';
+                    else if (attachmentData.type === 'audio') resolvedMessageType = 'audio';
+                    else resolvedMessageType = 'file';
+                }
+
                 // Create message
                 const message = new Message({
                     sender: sender.id,
                     to: toUserId,
                     conversationId: conversation._id,
                     text: text || '',
-                    messageType: attachmentData ? 'image' : 'text',
+                    messageType: resolvedMessageType,
                     senderName: fullName,
                     senderRole: role,
                     senderAvatar: avatar,
@@ -423,7 +537,9 @@ const initChat = (io) => {
                 // Update conversation last message
                 conversation.lastMessage = {
                     messageId: message._id,
-                    text: text || (attachmentData ? 'Sent an image' : ''),
+                    text: text || (attachmentData
+                        ? (attachmentData.type === 'image' ? '📷 Photo' : '📎 Attachment')
+                        : ''),
                     senderId: sender.id,
                     senderName: fullName,
                     timestamp: message.timestamp,
@@ -1031,24 +1147,29 @@ async function validateCommunication(senderId, receiverId) {
 }
 
 function formatMessage(message, sender = null) {
-    const msgObj = message.toObject ? message.toObject() : message;
+  const msgObj = message.toObject ? message.toObject() : message;
 
-    return {
-        id: msgObj._id.toString(),
-        text: msgObj.text || '',
-        senderId: msgObj.sender?.toString() || msgObj.from?.toString(),
-        senderName: msgObj.senderName || (sender ? sender.fullName : ''),
-        senderRole: msgObj.senderRole || (sender ? sender.role : ''),
-        senderAvatar: msgObj.senderAvatar || (sender ? sender.avatar : ''),
-        timestamp: msgObj.timestamp ? new Date(msgObj.timestamp).toISOString() : new Date().toISOString(),
-        deliveredAt: msgObj.deliveredAt ? new Date(msgObj.deliveredAt).toISOString() : null,
-        readAt: msgObj.readAt ? new Date(msgObj.readAt).toISOString() : null,
-        readBy: msgObj.readBy || [],
-        messageType: msgObj.messageType || 'text',
-        conversationId: msgObj.conversationId?.toString(),
-        attachment: msgObj.attachment || null,
-        metadata: msgObj.metadata || {}
-    };
+  return {
+    _id: msgObj._id.toString(),
+    id:  msgObj._id.toString(),
+    text: msgObj.text || '',
+    from: msgObj.sender?.toString() || msgObj.from?.toString(),
+    to: msgObj.to?.toString(),
+    fromRole: msgObj.senderRole || (sender ? sender.role : ''),
+    senderId: msgObj.sender?.toString() || msgObj.from?.toString(),
+    senderName: msgObj.senderName || (sender ? sender.fullName : ''),
+    senderRole: msgObj.senderRole || (sender ? sender.role : ''),
+    senderAvatar: msgObj.senderAvatar || (sender ? sender.avatar : ''),
+    timestamp: msgObj.timestamp ? new Date(msgObj.timestamp).toISOString() : new Date().toISOString(),
+    deliveredAt: msgObj.deliveredAt ? new Date(msgObj.deliveredAt).toISOString() : null,
+    readAt: msgObj.readAt ? new Date(msgObj.readAt).toISOString() : null,
+    readBy: msgObj.readBy || [],
+    messageType: msgObj.messageType || 'text',
+    conversationId: msgObj.conversationId?.toString(),
+    attachment: msgObj.attachment || null,
+    metadata: msgObj.metadata || {},
+    clientId: msgObj.metadata?.clientId || null,  // <-- ADD THIS LINE
+  };
 }
 
 function formatConversation(conversation, userId) {

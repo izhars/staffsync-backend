@@ -4,8 +4,6 @@ const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
 const validateHolidayInput = require('../middleware/validateHolidayInput');
-
-// ✅ Reuse your centralized upload middleware instead of redefining multer
 const { bulkUpload } = require('../middleware/upload');
 
 const {
@@ -17,13 +15,14 @@ const {
   getHolidaysByYear,
   getUpcomingHolidays,
   getHolidaysByType,
+  getHolidaysByCategory,          // ✅ NEW
+  getRestrictedHolidaySummary,    // ✅ NEW
   bulkImportHolidays,
   exportHolidays,
   getHolidayStats,
   permanentDeleteHoliday
 } = require('../controllers/holidayController');
 
-// ========== ALL ROUTES REQUIRE AUTHENTICATION ==========
 router.use(protect);
 
 // ========== PUBLIC (Authenticated Users) ==========
@@ -31,6 +30,8 @@ router.get('/', getHolidays);
 router.get('/year/:year', getHolidaysByYear);
 router.get('/upcoming', getUpcomingHolidays);
 router.get('/type/:type', getHolidaysByType);
+router.get('/category/:category', getHolidaysByCategory);              // ✅ NEW
+router.get('/restricted/summary', getRestrictedHolidaySummary);        // ✅ NEW
 router.get('/:id', validateObjectId, getHolidayById);
 
 // ========== HR & SUPERADMIN ACCESS ==========
@@ -38,8 +39,8 @@ router.post('/', authorize('hr', 'superadmin'), validateHolidayInput, addHoliday
 router.put('/:id', authorize('hr', 'superadmin'), validateObjectId, validateHolidayInput, updateHoliday);
 router.delete('/:id', authorize('hr', 'superadmin'), validateObjectId, deleteHoliday);
 
-// ========== BULK IMPORT (HR & Superadmin) ==========
-router.post('/bulk-import', authorize('hr', 'superadmin'), bulkUpload.single('file'),bulkImportHolidays);
+// ========== BULK IMPORT ==========
+router.post('/bulk-import', authorize('hr', 'superadmin'), bulkUpload.single('file'), bulkImportHolidays);
 
 // ========== SUPERADMIN ONLY ==========
 router.delete('/:id/permanent', authorize('superadmin'), validateObjectId, permanentDeleteHoliday);

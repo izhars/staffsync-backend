@@ -7,41 +7,61 @@ const geoFenceLocationSchema = new mongoose.Schema({
     trim: true,
     unique: true,
   },
+  // NEW: 'polyline' added to enum
   type: {
     type: String,
-    enum: ['office', 'site', 'warehouse', 'client', 'other'],
+    enum: ['office', 'site', 'warehouse', 'client', 'highway', 'polyline', 'other'],
     default: 'office',
+  },
+  // NEW: shape determines how geo-fence is validated
+  shape: {
+    type: String,
+    enum: ['circle', 'polyline'],
+    default: 'circle',
   },
   address: {
     type: String,
     required: [true, 'Address is required'],
     trim: true,
   },
+
+  // ── Circle fields (optional when shape = polyline) ─────────────
   latitude: {
     type: Number,
-    required: [true, 'Latitude is required'],
     min: -90,
     max: 90,
   },
   longitude: {
     type: Number,
-    required: [true, 'Longitude is required'],
     min: -180,
     max: 180,
   },
   radiusMeters: {
     type: Number,
-    required: true,
     default: 100,
     min: 10,
-    max: 5000, // max 5km
+    max: 5000,
   },
+
+  // ── Polyline fields (optional when shape = circle) ─────────────
+  // Array of { latitude, longitude } points defining the route/path
+  polylinePoints: [{
+    latitude: { type: Number, required: true, min: -90, max: 90 },
+    longitude: { type: Number, required: true, min: -180, max: 180 },
+    label: { type: String, trim: true }, // optional: "KM 12", "Toll Plaza"
+  }],
+  // Corridor width in meters — how far from the line an employee can be
+  corridorWidthMeters: {
+    type: Number,
+    default: 100,
+    min: 10,
+    max: 2000,
+  },
+
   isActive: {
     type: Boolean,
     default: true,
   },
-  // Optional: assign specific departments/employees
-  // If empty, location is available to ALL employees
   allowedDepartments: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Department',
@@ -50,7 +70,6 @@ const geoFenceLocationSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
   }],
-  // Who created this location
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -60,11 +79,26 @@ const geoFenceLocationSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// Index for quick lookups
+// Validate: circle needs lat/lng, polyline needs points
+geoFenceLocationSchema.pre('validate', function (next) {
+  if (this.shape === 'circle') {
+    if (this.latitude === undefined || this.longitude === undefined) {
+      return next(new Error('Latitude and longitude are required for circle geo-fence'));
+    }
+  } else if (this.shape === 'polyline') {
+    if (!this.polylinePoints || this.polylinePoints.length < 2) {
+      return next(new Error('At least 2 polyline points are required for polyline geo-fence'));
+    }
+  }
+  next();
+});
+
 geoFenceLocationSchema.index({ isActive: 1 });
 
-// Virtual for formatted coordinates
 geoFenceLocationSchema.virtual('coordinates').get(function () {
+  if (this.shape === 'polyline') {
+    return `${this.polylinePoints?.length || 0} points`;
+  }
   return `${this.latitude}, ${this.longitude}`;
 });
 

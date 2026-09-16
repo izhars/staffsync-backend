@@ -1,10 +1,10 @@
 const cloudinary = require('cloudinary').v2;
-const { 
-  uploadToCloudinary, 
-  deleteFromCloudinary, 
-  uploadGroupAvatar, 
+const {
+  uploadToCloudinary,
+  deleteFromCloudinary,
+  uploadGroupAvatar,
   uploadProfilePicture,
-  uploadChatProfile 
+  uploadChatProfile
 } = require('../middleware/upload');
 const Message = require('../models/Message');
 const User = require('../models/User');
@@ -17,7 +17,7 @@ const AppError = require('../utils/appError');
 exports.uploadGroupAvatar = async (req, res) => {
   try {
     console.log('📤 [Group Avatar Upload] Starting...');
-    
+
     if (!req.file) {
       console.log('❌ No file uploaded');
       return res.status(400).json({
@@ -42,7 +42,7 @@ exports.uploadGroupAvatar = async (req, res) => {
     if (groupId) {
       console.log(`🔍 Updating avatar for group: ${groupId}`);
       const group = await Conversation.findById(groupId);
-      
+
       if (!group) {
         return res.status(404).json({
           success: false,
@@ -112,7 +112,7 @@ exports.uploadGroupAvatar = async (req, res) => {
 exports.uploadProfilePicture = async (req, res) => {
   try {
     console.log('📤 [Profile Picture Upload] Starting...');
-    
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -121,7 +121,7 @@ exports.uploadProfilePicture = async (req, res) => {
     }
 
     const userId = req.body.userId || req.user.id;
-    
+
     // Check permission
     if (userId !== req.user.id && req.user.role !== 'admin') {
       return res.status(403).json({
@@ -190,7 +190,7 @@ exports.uploadProfilePicture = async (req, res) => {
 exports.uploadChatProfile = async (req, res) => {
   try {
     console.log('📤 [Chat Profile Upload] Starting...');
-    
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -200,7 +200,7 @@ exports.uploadChatProfile = async (req, res) => {
 
     const userId = req.user.id;
     const user = await User.findById(userId);
-    
+
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -263,11 +263,18 @@ exports.uploadFile = async (req, res) => {
 
     const { type, messageId, userId } = req.body;
 
+    // Choose upload type from config
+    const uploadType = type === 'profile' ? 'profile' : 'chat';
+
     // Upload to Cloudinary using buffer from memory storage
-    const cloudinaryResult = await uploadToCloudinary(req.file.buffer, {
-      folder: type === 'profile' ? 'profiles' : 'chat_attachments',
-      resource_type: 'auto',
-    });
+    const cloudinaryResult = await uploadToCloudinary(
+      req.file.buffer,
+      uploadType,
+      {
+        folder: type === 'profile' ? 'profiles' : 'chat_attachments',
+        resource_type: 'auto',
+      }
+    );
 
     // Update chat message attachment
     if (type === 'chat' && messageId) {
@@ -332,6 +339,7 @@ exports.uploadFile = async (req, res) => {
   }
 };
 
+
 // Upload multiple files
 exports.uploadMultipleFiles = async (req, res) => {
   try {
@@ -343,10 +351,19 @@ exports.uploadMultipleFiles = async (req, res) => {
 
     for (const file of req.files) {
       try {
-        const cloudinaryResult = await uploadToCloudinary(file.buffer, {
-          folder: 'chat_attachments',
-          resource_type: 'auto',
-        });
+        // Determine the upload type based on the request body,
+        // falling back to 'chat' (chat_attachments config).
+        const uploadType = req.body.type || 'chat';
+
+        const cloudinaryResult = await uploadToCloudinary(
+          file.buffer,
+          uploadType, // 👈 string, not an object
+          {
+            folder: 'chat_attachments',
+            resource_type: 'auto',
+            public_id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          }
+        );
 
         uploadResults.push({
           success: true,
@@ -357,6 +374,10 @@ exports.uploadMultipleFiles = async (req, res) => {
             size: file.size,
             mimeType: file.mimetype,
             type: file.mimetype.startsWith('image/') ? 'image' : 'file',
+            dimensions:
+              cloudinaryResult.width && cloudinaryResult.height
+                ? { width: cloudinaryResult.width, height: cloudinaryResult.height }
+                : null,
           },
         });
       } catch (fileError) {
@@ -369,14 +390,19 @@ exports.uploadMultipleFiles = async (req, res) => {
       }
     }
 
+    const successCount = uploadResults.filter((r) => r.success).length;
+
     res.json({
       success: true,
-      message: `${uploadResults.filter(r => r.success).length} files uploaded successfully`,
+      message: `${successCount} file${successCount === 1 ? '' : 's'} uploaded successfully`,
       results: uploadResults,
     });
   } catch (error) {
     console.error('❌ Multiple upload error:', error);
-    res.status(500).json({ success: false, error: error.message || 'File upload failed' });
+    res.status(500).json({
+      success: false,
+      error: error.message || 'File upload failed',
+    });
   }
 };
 

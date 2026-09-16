@@ -4,11 +4,16 @@ const Holiday = require('../models/Holiday');
 const Leave = require('../models/Leave');
 const ComboOff = require('../models/ComboOff');
 const moment = require('moment-timezone');
+const RestrictedHolidayUsage = require('../models/RestrictedHolidayUsage');
 const { isWithinAnyGeoFence } = require('../utils/geoFence');
 const {
   evaluatePunchVerification,
   PRIVILEGED_ROLES,
 } = require('../utils/punchVerification');
+const FaceEmbedding = require('../models/FaceEmbedding');
+const { verifyEmployeeFace } = require('../utils/faceMatch');
+const FACE_MATCH_THRESHOLD = 0.75;
+
 const {
   getISTDate,
   getISTMidnight,
@@ -21,7 +26,7 @@ const {
 
 exports.checkIn = async (req, res) => {
   try {
-    const { latitude, longitude, address, deviceInfo } = req.body;
+    const { latitude, longitude, address, deviceInfo, faceEmbedding } = req.body;
     const today = getISTMidnight();
 
     // ── 0. Fetch user with role + weekend + department ────────────────
@@ -55,6 +60,28 @@ exports.checkIn = async (req, res) => {
       });
     }
 
+    // ── 1b. Face verification (mobile, non-privileged employees) ──────
+    const requiresFace =
+      verification.punchedFrom === 'mobile' && !PRIVILEGED_ROLES.includes(user.role);
+
+    let faceResult = null;
+    if (requiresFace) {
+      faceResult = await verifyEmployeeFace(
+        FaceEmbedding,
+        req.user.id,
+        faceEmbedding,
+        FACE_MATCH_THRESHOLD
+      );
+      if (!faceResult.ok) {
+        return res.status(faceResult.status).json({
+          success: false,
+          reason: faceResult.reason,
+          message: faceResult.message,
+          ...(faceResult.similarity !== undefined && { similarity: faceResult.similarity }),
+        });
+      }
+    }
+
     // ── 2. Geo-fence (only if GPS present) ────────────────────────────
     let geoCheck = {
       allowed: true,
@@ -70,7 +97,6 @@ exports.checkIn = async (req, res) => {
         user?.department
       );
 
-      // HR/Admin with GPS but outside fence → allow, tag bypass
       if (!geoCheck.allowed && PRIVILEGED_ROLES.includes(user.role)) {
         console.warn(
           `[GEO-FENCE] ⚠️ HR/Admin outside fence (${geoCheck.reason}). Allowing with bypass tag.`
@@ -107,7 +133,11 @@ exports.checkIn = async (req, res) => {
     });
 
     let comboOff = null;
-    if (isWeekend || holiday) {
+    let isRestrictedHoliday = false;
+    let restrictedHolidayQuota = null;
+
+    if (isWeekend && !holiday) {
+      // ── Plain weekend (no holiday) ──
       comboOff = await ComboOff.findOne({
         employee: req.user.id,
         date: today,
@@ -115,10 +145,79 @@ exports.checkIn = async (req, res) => {
       });
 
       if (!comboOff) {
-        const msg = holiday
-          ? `Cannot check in on holiday (${holiday.name}) without approved Combo Off`
-          : 'Cannot check in on your weekly off day without approved Combo Off';
-        return res.status(400).json({ success: false, message: msg });
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot check in on your weekly off day without approved Combo Off',
+        });
+      }
+    } else if (holiday) {
+      // ── Holiday present ──
+      if (holiday.category === 'Mandatory') {
+        // Mandatory holiday → block unless Combo Off approved
+        comboOff = await ComboOff.findOne({
+          employee: req.user.id,
+          date: today,
+          status: 'approved',
+        });
+
+        if (!comboOff) {
+          return res.status(400).json({
+            success: false,
+            message: `Cannot check in on Mandatory holiday (${holiday.name}) without approved Combo Off`,
+          });
+        }
+      } else if (holiday.category === 'Restricted') {
+        isRestrictedHoliday = true;
+
+        const currentYear = new Date(today).getFullYear();
+
+        // Quota: use maxAllowed from holiday if set, else default 2
+        const quota =
+          holiday.maxAllowed && holiday.maxAllowed > 0
+            ? holiday.maxAllowed
+            : 2;
+        restrictedHolidayQuota = quota;
+
+        // Check if user already availed THIS holiday
+        const existingUsageForThisHoliday =
+          await RestrictedHolidayUsage.findOne({
+            employee: req.user.id,
+            holiday: holiday._id,
+          });
+
+        if (existingUsageForThisHoliday) {
+          return res.status(400).json({
+            success: false,
+            message: `You have already availed the restricted holiday: ${holiday.name}`,
+          });
+        }
+
+        // Count how many restricted holidays availed this year
+        const usedCount = await RestrictedHolidayUsage.countDocuments({
+          employee: req.user.id,
+          year: currentYear,
+        });
+
+        if (usedCount >= quota) {
+          return res.status(400).json({
+            success: false,
+            message: `You have exhausted your restricted holiday quota for ${currentYear} (${usedCount}/${quota} used)`,
+          });
+        }
+
+        // Check applicability
+        if (
+          holiday.applicableTo &&
+          !holiday.applicableTo.includes('all') &&
+          !holiday.applicableTo.includes(user.role)
+        ) {
+          return res.status(403).json({
+            success: false,
+            message: `You are not eligible for this restricted holiday`,
+          });
+        }
+
+        // ✅ No Combo Off required for restricted holidays
       }
     }
 
@@ -172,21 +271,28 @@ exports.checkIn = async (req, res) => {
       time: checkInTime,
       location: hasCoords
         ? {
-          latitude,
-          longitude,
-          address,
-          matchedLocationName: geoCheck.matchedLocation?.name,
-          distanceFromOffice: geoCheck.matchedLocation?.distance,
-        }
+            latitude,
+            longitude,
+            address,
+            matchedLocationName: geoCheck.matchedLocation?.name,
+            distanceFromOffice: geoCheck.matchedLocation?.distance,
+          }
         : {
-          address: address || 'Desktop / No GPS',
-        },
+            address: address || 'Desktop / No GPS',
+          },
       deviceInfo,
       punchedFrom: verification.punchedFrom,
-      verificationMethod: verification.method,
+      verificationMethod: requiresFace
+        ? (hasCoords ? 'FACE_GPS' : 'FACE_ONLY')
+        : verification.method,
       isGpsBypassed: verification.bypass,
       bypassReason: verification.reason,
       clientIp: verification.clientIp,
+      faceVerified: !!faceResult?.ok,
+      faceSimilarity: faceResult?.similarity ?? null,
+      faceThreshold: faceResult?.threshold ?? null,
+      faceModel: faceResult?.model ?? null,
+      faceLivenessPassed: requiresFace,
     };
 
     let attendance;
@@ -207,11 +313,44 @@ exports.checkIn = async (req, res) => {
       });
     }
 
-    // ── 8. Mark Combo Off as earned ───────────────────────────────────
+    // ── 8. Mark Combo Off as earned (only for weekend/mandatory holidays) ──
     if (comboOff) {
       comboOff.status = 'earned';
       comboOff.earnedOn = new Date();
       await comboOff.save();
+    }
+
+    // ── 8b. Record restricted holiday usage ───────────────────────────
+    if (isRestrictedHoliday && holiday) {
+      try {
+        await RestrictedHolidayUsage.create({
+          employee: req.user.id,
+          holiday: holiday._id,
+          date: today,
+          year: new Date(today).getFullYear(),
+          action: 'punched_in',
+        });
+      } catch (err) {
+        // Duplicate key → already recorded; ignore
+        if (err.code !== 11000) {
+          console.error('Failed to record restricted holiday usage:', err);
+        }
+      }
+    }
+
+    // ── 9. Response ───────────────────────────────────────────────────
+    const responseExtras = {};
+    if (isRestrictedHoliday && holiday) {
+      const usedCount = await RestrictedHolidayUsage.countDocuments({
+        employee: req.user.id,
+        year: new Date(today).getFullYear(),
+      });
+      responseExtras.restrictedHoliday = {
+        holidayName: holiday.name,
+        used: usedCount,
+        quota: restrictedHolidayQuota,
+        remaining: Math.max(0, restrictedHolidayQuota - usedCount),
+      };
     }
 
     res.status(200).json({
@@ -227,6 +366,10 @@ exports.checkIn = async (req, res) => {
         bypassed: verification.bypass,
         punchedFrom: verification.punchedFrom,
       },
+      face: requiresFace
+        ? { verified: true, similarity: faceResult.similarity, threshold: faceResult.threshold }
+        : { verified: false },
+      ...responseExtras,
       attendance: {
         ...attendance.toObject(),
         checkInTimeFormatted: formatISTTime(attendance.checkIn.time),
@@ -240,7 +383,7 @@ exports.checkIn = async (req, res) => {
 
 exports.checkOut = async (req, res) => {
   try {
-    const { latitude, longitude, address, deviceInfo } = req.body;
+    const { latitude, longitude, address, deviceInfo, faceEmbedding } = req.body;
 
     // ── 0. Fetch user ─────────────────────────────────────────────────
     const user = await User.findById(req.user.id).select('department role');
@@ -269,6 +412,28 @@ exports.checkOut = async (req, res) => {
         reason: verification.reason,
         message: msg,
       });
+    }
+
+    // ── 1b. Face verification (mobile, non-privileged employees) ──────
+    const requiresFace =
+      verification.punchedFrom === 'mobile' && !PRIVILEGED_ROLES.includes(user.role);
+
+    let faceResult = null;
+    if (requiresFace) {
+      faceResult = await verifyEmployeeFace(
+        FaceEmbedding,
+        req.user.id,
+        faceEmbedding,
+        FACE_MATCH_THRESHOLD
+      );
+      if (!faceResult.ok) {
+        return res.status(faceResult.status).json({
+          success: false,
+          reason: faceResult.reason,
+          message: faceResult.message,
+          ...(faceResult.similarity !== undefined && { similarity: faceResult.similarity }),
+        });
+      }
     }
 
     // ── 2. Geo-fence (only if GPS) ────────────────────────────────────
@@ -357,21 +522,28 @@ exports.checkOut = async (req, res) => {
       time: checkOutTime,
       location: hasCoords
         ? {
-          latitude,
-          longitude,
-          address,
-          matchedLocationName: geoCheck.matchedLocation?.name,
-          distanceFromOffice: geoCheck.matchedLocation?.distance,
-        }
+            latitude,
+            longitude,
+            address,
+            matchedLocationName: geoCheck.matchedLocation?.name,
+            distanceFromOffice: geoCheck.matchedLocation?.distance,
+          }
         : {
-          address: address || 'Desktop / No GPS',
-        },
+            address: address || 'Desktop / No GPS',
+          },
       deviceInfo,
       punchedFrom: verification.punchedFrom,
-      verificationMethod: verification.method,
+      verificationMethod: requiresFace
+        ? (hasCoords ? 'FACE_GPS' : 'FACE_ONLY')
+        : verification.method,
       isGpsBypassed: verification.bypass,
       bypassReason: verification.reason,
       clientIp: verification.clientIp,
+      faceVerified: !!faceResult?.ok,
+      faceSimilarity: faceResult?.similarity ?? null,
+      faceThreshold: faceResult?.threshold ?? null,
+      faceModel: faceResult?.model ?? null,
+      faceLivenessPassed: requiresFace,
     };
 
     const workHours = parseFloat(
@@ -384,6 +556,38 @@ exports.checkOut = async (req, res) => {
     if (missedCheckout) attendance.missedCheckout = true;
 
     await attendance.save();
+
+    // ── 6. Restricted holiday context (informational only) ────────────
+    let restrictedHolidayInfo = null;
+    try {
+      const holiday = await Holiday.findOne({
+        date: { $gte: today, $lt: new Date(today.getTime() + 86400000) },
+        isActive: true,
+        category: 'Restricted',
+      });
+
+      if (holiday) {
+        const currentYear = new Date(today).getFullYear();
+        const quota =
+          holiday.maxAllowed && holiday.maxAllowed > 0
+            ? holiday.maxAllowed
+            : 2;
+
+        const usedCount = await RestrictedHolidayUsage.countDocuments({
+          employee: req.user.id,
+          year: currentYear,
+        });
+
+        restrictedHolidayInfo = {
+          holidayName: holiday.name,
+          used: usedCount,
+          quota,
+          remaining: Math.max(0, quota - usedCount),
+        };
+      }
+    } catch (err) {
+      console.error('Failed to fetch restricted holiday info:', err);
+    }
 
     res.status(200).json({
       success: true,
@@ -402,10 +606,14 @@ exports.checkOut = async (req, res) => {
         bypassed: verification.bypass,
         punchedFrom: verification.punchedFrom,
       },
+      face: requiresFace
+        ? { verified: true, similarity: faceResult.similarity, threshold: faceResult.threshold }
+        : { verified: false },
       location: {
         matchedLocation: geoCheck.matchedLocation,
         distance: geoCheck.matchedLocation?.distance,
       },
+      ...(restrictedHolidayInfo && { restrictedHoliday: restrictedHolidayInfo }),
       attendance: {
         ...attendance.toObject(),
         checkInTimeFormatted: formatISTTime(attendance.checkIn.time),
@@ -417,7 +625,6 @@ exports.checkOut = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
 
 // @desc    Mark missed checkouts
 // @access  Internal (e.g., cron job)
@@ -441,6 +648,13 @@ exports.markMissedCheckouts = async () => {
   }
 };
 
+// Helper (put near top of file, after imports)
+function computeWorkHours(checkInTime, checkOutTime) {
+  if (!checkInTime || !checkOutTime) return 0;
+  const diffMs = new Date(checkOutTime) - new Date(checkInTime);
+  return Number((diffMs / (1000 * 60 * 60)).toFixed(2));
+}
+
 // @desc    Get my attendance
 // @route   GET /api/attendance/my-attendance
 // @access  Private
@@ -449,7 +663,6 @@ exports.getMyAttendance = async (req, res) => {
     const { startDate, endDate, month, year } = req.query;
     const employeeId = req.user.id;
 
-    // Fetch weekend type + dateOfJoining
     const user = await User.findById(employeeId)
       .select("weekendType dateOfJoining");
 
@@ -463,28 +676,25 @@ exports.getMyAttendance = async (req, res) => {
     const weekendType = user.weekendType || "sunday";
     const doj = moment(user.dateOfJoining).tz("Asia/Kolkata").startOf("day");
 
-    // Date range setup
     let start, end;
 
     if (startDate && endDate) {
       start = moment.tz(startDate, "Asia/Kolkata").startOf("day");
-      end = moment.tz(endDate, "Asia/Kolkata").endOf("day");
+      end   = moment.tz(endDate,   "Asia/Kolkata").endOf("day");
     } else if (month && year) {
       start = moment.tz({ year, month: month - 1, day: 1 }, "Asia/Kolkata").startOf("day");
-      end = moment(start).endOf("month");
+      end   = moment(start).endOf("month");
     } else {
       start = moment.tz("Asia/Kolkata").startOf("month");
-      end = moment(start).endOf("month");
+      end   = moment(start).endOf("month");
     }
 
-    // FIX: Don’t mark days before joining
     start = moment.max(start, doj);
 
     const startUTC = start.clone().utc().toDate();
-    const endUTC = end.clone().utc().toDate();
+    const endUTC   = end.clone().utc().toDate();
 
-    // Fetch all data
-    const [attendance, holidays, comboOffs] = await Promise.all([
+    const [attendance, holidays, comboOffs, leaves] = await Promise.all([
       Attendance.find({
         employee: employeeId,
         date: { $gte: startUTC, $lte: endUTC },
@@ -500,49 +710,71 @@ exports.getMyAttendance = async (req, res) => {
         date: { $gte: startUTC, $lte: endUTC },
         status: { $in: ["approved", "used", "earned"] },
       }).lean(),
+
+      Leave.find({
+        employee: employeeId,
+        fromDate: { $lte: endUTC },
+        toDate:   { $gte: startUTC },
+        status: "approved",
+      }).lean(),
     ]);
 
-    // Quick lookup maps
     const holidayMap = new Map(
       holidays.map(h => [
-        moment(h.date).format("YYYY-MM-DD"),
-        { name: h.name, type: h.type }
+        moment(h.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
+        { name: h.name, type: h.type, category: h.category },
       ])
     );
 
     const attendanceMap = new Map(
-      attendance.map(a => [moment(a.date).format("YYYY-MM-DD"), a])
+      attendance.map(a => [
+        moment(a.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
+        a,
+      ])
     );
 
     const comboOffMap = new Map(
-      comboOffs.map(c => [moment(c.date).format("YYYY-MM-DD"), c])
+      comboOffs.map(c => [
+        moment(c.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
+        c,
+      ])
     );
+
+    const leaveMap = new Map();
+    leaves.forEach(l => {
+      let d = moment(l.fromDate).tz("Asia/Kolkata").startOf("day");
+      const last = moment(l.toDate).tz("Asia/Kolkata").startOf("day");
+      while (d.isSameOrBefore(last, "day")) {
+        leaveMap.set(d.format("YYYY-MM-DD"), l);
+        d.add(1, "day");
+      }
+    });
 
     const today = moment.tz("Asia/Kolkata").startOf("day");
     const totalDays = [];
     let current = start.clone();
 
-    // Build attendance list
     while (current.isSameOrBefore(end, "day") && current.isSameOrBefore(today, "day")) {
       const dateKey = current.format("YYYY-MM-DD");
-      const day = getISTDay(current);  // 0 = Sun, 6 = Sat
+      const day = getISTDay(current);
 
-      const record = attendanceMap.get(dateKey);
-      const holiday = holidayMap.get(dateKey);
+      const record   = attendanceMap.get(dateKey);
+      const holiday  = holidayMap.get(dateKey);
       const comboOff = comboOffMap.get(dateKey);
+      const leave    = leaveMap.get(dateKey);
 
       let isWeekend = false;
-
       if (weekendType === "sunday") {
         isWeekend = day === 0;
       } else if (weekendType === "saturday_sunday") {
         isWeekend = day === 0 || day === 6;
       }
 
-      // 1. Combo-off
+      // Priority: Combo-off → Leave → Attendance → Holiday → Weekend → Absent
+
       if (comboOff) {
         totalDays.push({
-          date: current.toDate(),
+          date: dateKey,
           status: "combo-off",
           comboOffStatus: comboOff.status,
           remarks: comboOff.remarks || null,
@@ -552,43 +784,48 @@ exports.getMyAttendance = async (req, res) => {
           checkOut: { time: null },
           isLate: false,
         });
-      }
-
-      // 2. Holiday
-      else if (holiday) {
+      } else if (leave) {
         totalDays.push({
-          date: current.toDate(),
-          status: "holiday",
-          holidayName: holiday.name,
-          holidayType: holiday.type,
+          date: dateKey,
+          status: "on-leave",
+          leaveType: leave.type || leave.leaveType,
           workHours: 0,
           checkIn: { time: null },
           checkOut: { time: null },
           isLate: false,
         });
-      }
+      } else if (record) {
+        // ✅ Real punch wins over holiday/weekend
+        const isToday = current.isSame(today, "day");
 
-      // 3. Weekend
-      else if (isWeekend) {
+        let workHours = record.workHours || 0;
+        if (isToday) {
+          workHours = getCurrentWorkHours(record);
+        } else if (record.checkIn?.time && record.checkOut?.time) {
+          workHours = computeWorkHours(record.checkIn.time, record.checkOut.time);
+        }
+
+        const missedCheckout =
+          !isToday && !!record.checkIn?.time && !record.checkOut?.time;
+
+        const {
+          _id, employee, createdAt, updatedAt, __v,
+          ...cleanRecord
+        } = record;
+
         totalDays.push({
-          date: current.toDate(),
-          status: "weekly-off",
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      }
-
-      // 4. Present / Half-day / etc.
-      else if (record) {
-        const workHours = current.isSame(today, "day")
-          ? getCurrentWorkHours(record)
-          : record.workHours;
-
-        totalDays.push({
-          ...record,
+          ...cleanRecord,
+          date: dateKey,
+          status: record.status || "present",
           workHours,
+          missedCheckout,
+
+          // Keep holiday/weekend context for UI badges
+          holidayName: holiday?.name || null,
+          holidayType: holiday?.type || null,
+          isRestrictedHoliday: holiday?.category === "Restricted",
+          isWeeklyOffWork: isWeekend || false,
+
           checkInTimeFormatted: record.checkIn?.time
             ? formatISTTime(record.checkIn.time)
             : null,
@@ -596,12 +833,30 @@ exports.getMyAttendance = async (req, res) => {
             ? formatISTTime(record.checkOut.time)
             : null,
         });
-      }
-
-      // 5. Absent
-      else {
+      } else if (holiday) {
         totalDays.push({
-          date: current.toDate(),
+          date: dateKey,
+          status: "holiday",
+          holidayName: holiday.name,
+          holidayType: holiday.type,
+          holidayCategory: holiday.category,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (isWeekend) {
+        totalDays.push({
+          date: dateKey,
+          status: "weekly-off",
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else {
+        totalDays.push({
+          date: dateKey,
           status: "absent",
           workHours: 0,
           checkIn: { time: null },
@@ -613,7 +868,6 @@ exports.getMyAttendance = async (req, res) => {
       current.add(1, "day");
     }
 
-    // Summary
     const stats = {
       totalDays: totalDays.length,
       present: totalDays.filter(a => a.status === "present").length,
@@ -623,8 +877,19 @@ exports.getMyAttendance = async (req, res) => {
       holiday: totalDays.filter(a => a.status === "holiday").length,
       weeklyOff: totalDays.filter(a => a.status === "weekly-off").length,
       comboOff: totalDays.filter(a => a.status === "combo-off").length,
-      totalWorkHours: totalDays.reduce((s, a) => s + (a.workHours || 0), 0),
+
+      totalWorkHours: Number(
+        totalDays.reduce((s, a) => s + (a.workHours || 0), 0).toFixed(2)
+      ),
       lateCount: totalDays.filter(a => a.isLate).length,
+
+      workedOnHoliday: totalDays.filter(
+        a => a.status === "present" && a.holidayName
+      ).length,
+      workedOnWeeklyOff: totalDays.filter(
+        a => a.status === "present" && a.isWeeklyOffWork
+      ).length,
+      missedCheckouts: totalDays.filter(a => a.missedCheckout).length,
     };
 
     res.status(200).json({
@@ -639,7 +904,6 @@ exports.getMyAttendance = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
 
 // @desc    Get today's attendance
 // @route   GET /api/attendance/today
@@ -708,68 +972,131 @@ exports.getTodayAttendance = async (req, res) => {
 // @desc    Get employee attendance (for managers/HR)
 // @route   GET /api/attendance/employee/:employeeId
 // @access  Private (Manager, HR, Admin)
-exports.getEmployeeAttendance = async (req, res) => {
+exports.getMyAttendance = async (req, res) => {
   try {
     const { startDate, endDate, month, year } = req.query;
-    const employeeId = req.params.employeeId;
+    const employeeId = req.user.id;
 
-    // fetch employee details
-    const user = await User.findById(employeeId).select("firstName lastName fullName email employeeId weekendType dateOfJoining");
+    // ── 1. Fetch user context ─────────────────────────────────────────
+    const user = await User.findById(employeeId)
+      .select("weekendType dateOfJoining");
+
     if (!user) {
-      return res.status(404).json({ success: false, message: "Employee not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
     }
 
     const weekendType = user.weekendType || "sunday";
     const doj = moment(user.dateOfJoining).tz("Asia/Kolkata").startOf("day");
 
-    // date range
+    // ── 2. Date range setup ───────────────────────────────────────────
     let start, end;
+
     if (startDate && endDate) {
       start = moment.tz(startDate, "Asia/Kolkata").startOf("day");
-      end = moment.tz(endDate, "Asia/Kolkata").endOf("day");
+      end   = moment.tz(endDate,   "Asia/Kolkata").endOf("day");
     } else if (month && year) {
       start = moment.tz({ year, month: month - 1, day: 1 }, "Asia/Kolkata").startOf("day");
-      end = moment(start).endOf("month");
+      end   = moment(start).endOf("month");
     } else {
       start = moment.tz("Asia/Kolkata").startOf("month");
-      end = moment(start).endOf("month");
+      end   = moment(start).endOf("month");
     }
 
+    // Don't mark days before joining
     start = moment.max(start, doj);
-    const startUTC = start.clone().utc().toDate();
-    const endUTC = end.clone().utc().toDate();
 
-    // fetch all data
-    const [attendance, holidays, comboOffs] = await Promise.all([
-      Attendance.find({ employee: employeeId, date: { $gte: startUTC, $lte: endUTC } })
-        .sort({ date: -1 }).lean(),
-      Holiday.find({ date: { $gte: startUTC, $lte: endUTC }, isActive: true }).lean(),
-      ComboOff.find({ employee: employeeId, date: { $gte: startUTC, $lte: endUTC }, status: { $in: ["approved", "used", "earned"] } }).lean()
+    const startUTC = start.clone().utc().toDate();
+    const endUTC   = end.clone().utc().toDate();
+
+    // ── 3. Fetch all data in parallel ─────────────────────────────────
+    const [attendance, holidays, comboOffs, leaves] = await Promise.all([
+      Attendance.find({
+        employee: employeeId,
+        date: { $gte: startUTC, $lte: endUTC },
+      }).sort({ date: -1 }).lean(),
+
+      Holiday.find({
+        date: { $gte: startUTC, $lte: endUTC },
+        isActive: true,
+      }).lean(),
+
+      ComboOff.find({
+        employee: employeeId,
+        date: { $gte: startUTC, $lte: endUTC },
+        status: { $in: ["approved", "used", "earned"] },
+      }).lean(),
+
+      Leave.find({
+        employee: employeeId,
+        fromDate: { $lte: endUTC },
+        toDate:   { $gte: startUTC },
+        status: "approved",
+      }).lean(),
     ]);
 
-    const attendanceMap = new Map(attendance.map(a => [moment(a.date).format("YYYY-MM-DD"), a]));
-    const holidayMap = new Map(holidays.map(h => [moment(h.date).format("YYYY-MM-DD"), h]));
-    const comboOffMap = new Map(comboOffs.map(c => [moment(c.date).format("YYYY-MM-DD"), c]));
+    // ── 4. Build lookup maps ──────────────────────────────────────────
+    const holidayMap = new Map(
+      holidays.map(h => [
+        moment(h.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
+        { name: h.name, type: h.type },
+      ])
+    );
 
+    const attendanceMap = new Map(
+      attendance.map(a => [
+        moment(a.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
+        a,
+      ])
+    );
+
+    const comboOffMap = new Map(
+      comboOffs.map(c => [
+        moment(c.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
+        c,
+      ])
+    );
+
+    // Expand leave ranges into per-day entries
+    const leaveMap = new Map();
+    leaves.forEach(l => {
+      let d = moment(l.fromDate).tz("Asia/Kolkata").startOf("day");
+      const last = moment(l.toDate).tz("Asia/Kolkata").startOf("day");
+      while (d.isSameOrBefore(last, "day")) {
+        leaveMap.set(d.format("YYYY-MM-DD"), l);
+        d.add(1, "day");
+      }
+    });
+
+    // ── 5. Build attendance list day by day ──────────────────────────
     const today = moment.tz("Asia/Kolkata").startOf("day");
     const totalDays = [];
     let current = start.clone();
 
     while (current.isSameOrBefore(end, "day") && current.isSameOrBefore(today, "day")) {
       const dateKey = current.format("YYYY-MM-DD");
-      const day = getISTDay(current);
+      const day = getISTDay(current); // 0 = Sun, 6 = Sat
 
-      const record = attendanceMap.get(dateKey);
-      const holiday = holidayMap.get(dateKey);
+      const record   = attendanceMap.get(dateKey);
+      const holiday  = holidayMap.get(dateKey);
       const comboOff = comboOffMap.get(dateKey);
+      const leave    = leaveMap.get(dateKey);
 
       let isWeekend = false;
-      if (weekendType === "sunday") isWeekend = day === 0;
-      else if (weekendType === "saturday_sunday") isWeekend = day === 0 || day === 6;
+      if (weekendType === "sunday") {
+        isWeekend = day === 0;
+      } else if (weekendType === "saturday_sunday") {
+        isWeekend = day === 0 || day === 6;
+      }
 
+      // ── Priority: Combo-off → Leave → Attendance → Holiday → Weekend → Absent
+
+      // 1. Combo-off
       if (comboOff) {
         totalDays.push({
-          date: current.toDate(),
+          date: dateKey,
           status: "combo-off",
           comboOffStatus: comboOff.status,
           remarks: comboOff.remarks || null,
@@ -779,9 +1106,67 @@ exports.getEmployeeAttendance = async (req, res) => {
           checkOut: { time: null },
           isLate: false,
         });
-      } else if (holiday) {
+      }
+
+      // 2. Leave
+      else if (leave) {
         totalDays.push({
-          date: current.toDate(),
+          date: dateKey,
+          status: "on-leave",
+          leaveType: leave.type || leave.leaveType,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      }
+
+      // 3. Attendance — real punch wins over holiday/weekend
+      else if (record) {
+        const isToday = current.isSame(today, "day");
+
+        let workHours = record.workHours || 0;
+        if (isToday) {
+          workHours = getCurrentWorkHours(record);
+        } else if (record.checkIn?.time && record.checkOut?.time) {
+          workHours = computeWorkHours(record.checkIn.time, record.checkOut.time);
+        }
+
+        const missedCheckout =
+          !isToday && !!record.checkIn?.time && !record.checkOut?.time;
+
+        // Strip Mongoose internals
+        const {
+          _id, employee, createdAt, updatedAt, __v,
+          ...cleanRecord
+        } = record;
+
+        totalDays.push({
+          ...cleanRecord,
+          date: dateKey,
+          status: record.status || "present",
+          workHours,
+          missedCheckout,
+
+          // Holiday/weekend context so UI can still show badges
+          holidayName: holiday?.name || null,
+          holidayType: holiday?.type || null,
+          isRestrictedHoliday: holiday?.type === "Restricted",
+          isWeeklyOffWork: isWeekend || false,
+
+          checkInTimeFormatted: record.checkIn?.time
+            ? formatISTTime(record.checkIn.time)
+            : null,
+          checkOutTimeFormatted: record.checkOut?.time
+            ? formatISTTime(record.checkOut.time)
+            : null,
+        });
+      }
+
+      // 4. Holiday — only if no real attendance
+      else if (holiday) {
+        totalDays.push({
+          date: dateKey,
           status: "holiday",
           holidayName: holiday.name,
           holidayType: holiday.type,
@@ -790,26 +1175,24 @@ exports.getEmployeeAttendance = async (req, res) => {
           checkOut: { time: null },
           isLate: false,
         });
-      } else if (isWeekend) {
+      }
+
+      // 5. Weekend
+      else if (isWeekend) {
         totalDays.push({
-          date: current.toDate(),
+          date: dateKey,
           status: "weekly-off",
           workHours: 0,
           checkIn: { time: null },
           checkOut: { time: null },
           isLate: false,
         });
-      } else if (record) {
-        const workHours = current.isSame(today, "day") ? getCurrentWorkHours(record) : record.workHours;
+      }
+
+      // 6. Absent
+      else {
         totalDays.push({
-          ...record,
-          workHours,
-          checkInTimeFormatted: record.checkIn?.time ? formatISTTime(record.checkIn.time) : null,
-          checkOutTimeFormatted: record.checkOut?.time ? formatISTTime(record.checkOut.time) : null,
-        });
-      } else {
-        totalDays.push({
-          date: current.toDate(),
+          date: dateKey,
           status: "absent",
           workHours: 0,
           checkIn: { time: null },
@@ -821,9 +1204,10 @@ exports.getEmployeeAttendance = async (req, res) => {
       current.add(1, "day");
     }
 
-    // summary
+    // ── 6. Summary stats ──────────────────────────────────────────────
     const stats = {
       totalDays: totalDays.length,
+
       present: totalDays.filter(a => a.status === "present").length,
       absent: totalDays.filter(a => a.status === "absent").length,
       halfDay: totalDays.filter(a => a.status === "half-day").length,
@@ -831,26 +1215,30 @@ exports.getEmployeeAttendance = async (req, res) => {
       holiday: totalDays.filter(a => a.status === "holiday").length,
       weeklyOff: totalDays.filter(a => a.status === "weekly-off").length,
       comboOff: totalDays.filter(a => a.status === "combo-off").length,
-      totalWorkHours: totalDays.reduce((s, a) => s + (a.workHours || 0), 0),
+
+      totalWorkHours: Number(
+        totalDays.reduce((s, a) => s + (a.workHours || 0), 0).toFixed(2)
+      ),
       lateCount: totalDays.filter(a => a.isLate).length,
+
+      // Extra insight counters
+      workedOnHoliday: totalDays.filter(
+        a => a.status === "present" && a.holidayName
+      ).length,
+      workedOnWeeklyOff: totalDays.filter(
+        a => a.status === "present" && a.isWeeklyOffWork
+      ).length,
+      missedCheckouts: totalDays.filter(a => a.missedCheckout).length,
     };
 
+    // ── 7. Response ───────────────────────────────────────────────────
     res.status(200).json({
       success: true,
       count: totalDays.length,
       stats,
       attendance: totalDays,
-      employee: {
-        _id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        fullName: user.fullName || `${user.firstName} ${user.lastName}`,
-        email: user.email,
-        employeeId: user.employeeId,
-        weekendType: user.weekendType,
-        dateOfJoining: user.dateOfJoining
-      }
     });
+
   } catch (error) {
     console.error("Attendance fetch error:", error);
     res.status(500).json({ success: false, message: error.message });
@@ -1096,35 +1484,224 @@ exports.cancelAction = async (req, res) => {
 exports.getAttendanceStatus = async (req, res) => {
   try {
     const today = getISTMidnight();
-    const holiday = await Holiday.findOne({ date: today, isActive: true });
-    if (holiday) {
-      return res.status(200).json({ success: true, status: 'holiday', holidayName: holiday.name });
+
+    // 1. Real attendance wins first
+    const attendance = await Attendance.findOne({
+      employee: req.user.id,
+      date: today,
+    }).lean();
+
+    if (attendance?.checkOut?.time) {
+      return res.status(200).json({
+        success: true,
+        status: 'checked-out',
+        workHours: attendance.workHours || 0,
+      });
     }
-    if (today.getDay() === 0) {
+
+    if (attendance?.checkIn?.time) {
+      return res.status(200).json({
+        success: true,
+        status: 'checked-in',
+        currentWorkHours: getCurrentWorkHours(attendance),
+      });
+    }
+
+    // 2. Holiday
+    const holiday = await Holiday.findOne({
+      date: { $gte: today, $lt: new Date(today.getTime() + 86400000) },
+      isActive: true,
+    }).lean();
+
+    if (holiday) {
+      return res.status(200).json({
+        success: true,
+        status: 'holiday',
+        holidayName: holiday.name,
+        holidayCategory: holiday.category,
+      });
+    }
+
+    // 3. Weekend
+    const user = await User.findById(req.user.id).select('weekendType');
+    const weekendType = user?.weekendType || 'sunday';
+    const day = getISTDay(today);
+    const isWeekend =
+      (weekendType === 'sunday' && day === 0) ||
+      (weekendType === 'saturday_sunday' && (day === 0 || day === 6));
+
+    if (isWeekend) {
       return res.status(200).json({ success: true, status: 'weekly-off' });
     }
+
+    // 4. Leave
     const leave = await Leave.findOne({
       employee: req.user.id,
       fromDate: { $lte: today },
-      toDate: { $gte: today },
+      toDate:   { $gte: today },
       status: 'approved',
-    });
+    }).lean();
+
     if (leave) {
-      return res.status(200).json({ success: true, status: 'on-leave', leaveType: leave.type });
+      return res.status(200).json({
+        success: true,
+        status: 'on-leave',
+        leaveType: leave.type || leave.leaveType,
+      });
     }
-    const attendance = await Attendance.findOne({ employee: req.user.id, date: today });
-    if (!attendance || !attendance.checkIn?.time) {
-      return res.status(200).json({ success: false, status: 'absent' });
+
+    // 5. Absent
+    return res.status(200).json({ success: false, status: 'absent' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getEmployeeAttendance = async (req, res) => {
+  try {
+    const { startDate, endDate, month, year } = req.query;
+    const employeeId = req.params.employeeId;
+
+    // fetch employee details
+    const user = await User.findById(employeeId).select("firstName lastName fullName email employeeId weekendType dateOfJoining");
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Employee not found" });
     }
-    if (attendance.checkOut?.time) {
-      return res.status(200).json({ success: true, status: 'checked-out' });
+
+    const weekendType = user.weekendType || "sunday";
+    const doj = moment(user.dateOfJoining).tz("Asia/Kolkata").startOf("day");
+
+    // date range
+    let start, end;
+    if (startDate && endDate) {
+      start = moment.tz(startDate, "Asia/Kolkata").startOf("day");
+      end = moment.tz(endDate, "Asia/Kolkata").endOf("day");
+    } else if (month && year) {
+      start = moment.tz({ year, month: month - 1, day: 1 }, "Asia/Kolkata").startOf("day");
+      end = moment(start).endOf("month");
+    } else {
+      start = moment.tz("Asia/Kolkata").startOf("month");
+      end = moment(start).endOf("month");
     }
-    return res.status(200).json({
+
+    start = moment.max(start, doj);
+    const startUTC = start.clone().utc().toDate();
+    const endUTC = end.clone().utc().toDate();
+
+    // fetch all data
+    const [attendance, holidays, comboOffs] = await Promise.all([
+      Attendance.find({ employee: employeeId, date: { $gte: startUTC, $lte: endUTC } })
+        .sort({ date: -1 }).lean(),
+      Holiday.find({ date: { $gte: startUTC, $lte: endUTC }, isActive: true }).lean(),
+      ComboOff.find({ employee: employeeId, date: { $gte: startUTC, $lte: endUTC }, status: { $in: ["approved", "used", "earned"] } }).lean()
+    ]);
+
+    const attendanceMap = new Map(attendance.map(a => [moment(a.date).format("YYYY-MM-DD"), a]));
+    const holidayMap = new Map(holidays.map(h => [moment(h.date).format("YYYY-MM-DD"), h]));
+    const comboOffMap = new Map(comboOffs.map(c => [moment(c.date).format("YYYY-MM-DD"), c]));
+
+    const today = moment.tz("Asia/Kolkata").startOf("day");
+    const totalDays = [];
+    let current = start.clone();
+
+    while (current.isSameOrBefore(end, "day") && current.isSameOrBefore(today, "day")) {
+      const dateKey = current.format("YYYY-MM-DD");
+      const day = getISTDay(current);
+
+      const record = attendanceMap.get(dateKey);
+      const holiday = holidayMap.get(dateKey);
+      const comboOff = comboOffMap.get(dateKey);
+
+      let isWeekend = false;
+      if (weekendType === "sunday") isWeekend = day === 0;
+      else if (weekendType === "saturday_sunday") isWeekend = day === 0 || day === 6;
+
+      if (comboOff) {
+        totalDays.push({
+          date: current.toDate(),
+          status: "combo-off",
+          comboOffStatus: comboOff.status,
+          remarks: comboOff.remarks || null,
+          approvedBy: comboOff.approvedBy || null,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (holiday) {
+        totalDays.push({
+          date: current.toDate(),
+          status: "holiday",
+          holidayName: holiday.name,
+          holidayType: holiday.type,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (isWeekend) {
+        totalDays.push({
+          date: current.toDate(),
+          status: "weekly-off",
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (record) {
+        const workHours = current.isSame(today, "day") ? getCurrentWorkHours(record) : record.workHours;
+        totalDays.push({
+          ...record,
+          workHours,
+          checkInTimeFormatted: record.checkIn?.time ? formatISTTime(record.checkIn.time) : null,
+          checkOutTimeFormatted: record.checkOut?.time ? formatISTTime(record.checkOut.time) : null,
+        });
+      } else {
+        totalDays.push({
+          date: current.toDate(),
+          status: "absent",
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      }
+
+      current.add(1, "day");
+    }
+
+    // summary
+    const stats = {
+      totalDays: totalDays.length,
+      present: totalDays.filter(a => a.status === "present").length,
+      absent: totalDays.filter(a => a.status === "absent").length,
+      halfDay: totalDays.filter(a => a.status === "half-day").length,
+      onLeave: totalDays.filter(a => a.status === "on-leave").length,
+      holiday: totalDays.filter(a => a.status === "holiday").length,
+      weeklyOff: totalDays.filter(a => a.status === "weekly-off").length,
+      comboOff: totalDays.filter(a => a.status === "combo-off").length,
+      totalWorkHours: totalDays.reduce((s, a) => s + (a.workHours || 0), 0),
+      lateCount: totalDays.filter(a => a.isLate).length,
+    };
+
+    res.status(200).json({
       success: true,
-      status: 'checked-in',
-      currentWorkHours: getCurrentWorkHours(attendance),
+      count: totalDays.length,
+      stats,
+      attendance: totalDays,
+      employee: {
+        _id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        fullName: user.fullName || `${user.firstName} ${user.lastName}`,
+        email: user.email,
+        employeeId: user.employeeId,
+        weekendType: user.weekendType,
+        dateOfJoining: user.dateOfJoining
+      }
     });
   } catch (error) {
+    console.error("Attendance fetch error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -1175,25 +1752,16 @@ exports.exportAttendance = async (req, res) => {
   }
 };
 
-// @desc    Get today's attendance for all employees
-// @route   GET /api/attendance/today-all
-// @access  Private (HR, Admin)
-// @desc    Get today's attendance for all employees
-// @route   GET /api/attendance/today-all
-// @access  Private (HR, Admin)
 exports.getTodayAllEmployeesAttendance = async (req, res) => {
   try {
     const today = getISTMidnight();
-    const { department } = req.query; // Optional department filter
+    const { department } = req.query;
 
-    // Roles to include: employee, manager, hr
     const rolesToInclude = ['employee', 'manager', 'hr'];
 
-    // ── 1. Build employee query ────────────────────────────────────────
     const employeeQuery = { isActive: true, role: { $in: rolesToInclude } };
     if (department) employeeQuery.department = department;
 
-    // Fetch all active users (employee + manager + hr)
     const employees = await User.find(employeeQuery)
       .select('firstName lastName employeeId email department role weekendType')
       .populate('department', 'name')
@@ -1202,70 +1770,49 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
     if (employees.length === 0) {
       return res.status(200).json({
         success: true,
-        date: moment(today).format('YYYY-MM-DD'),
+        date: moment(today).tz('Asia/Kolkata').format('YYYY-MM-DD'),
         totalEmployees: 0,
         presentCount: 0,
         attendance: [],
       });
     }
 
-    // ── 2. Check for holiday or weekly off ─────────────────────────────
-    const holiday = await Holiday.findOne({ date: today, isActive: true });
-    if (holiday) {
-      return res.status(200).json({
-        success: true,
-        message: `Today is a holiday: ${holiday.name}`,
-        date: moment(today).format('YYYY-MM-DD'),
-        attendance: [],
-        totalEmployees: employees.length,
-        presentCount: 0,
-      });
-    }
+    // Holiday — DO NOT early-return; use it as context
+    const holiday = await Holiday.findOne({
+      date: { $gte: today, $lt: new Date(today.getTime() + 86400000) },
+      isActive: true,
+    }).lean();
 
-    // ── 3. Fetch today's attendance records ────────────────────────────
     const employeeIds = employees.map((e) => e._id);
 
-    const attendanceRecords = await Attendance.find({
-      date: today,
-      employee: { $in: employeeIds }, // ensure we only get relevant records
-    })
-      .populate('employee', 'firstName lastName employeeId email department role')
-      .lean();
+    const [attendanceRecords, leaves, comboOffs] = await Promise.all([
+      Attendance.find({
+        date: today,
+        employee: { $in: employeeIds },
+      }).lean(),
 
-    // ── 4. Fetch leaves for today ──────────────────────────────────────
-    const leaves = await Leave.find({
-      employee: { $in: employeeIds },
-      fromDate: { $lte: today },
-      toDate: { $gte: today },
-      status: 'approved',
-    }).lean();
+      Leave.find({
+        employee: { $in: employeeIds },
+        fromDate: { $lte: today },
+        toDate:   { $gte: today },
+        status: 'approved',
+      }).lean(),
 
-    const leaveMap = new Map(
-      leaves.map((l) => [l.employee.toString(), l])
-    );
+      ComboOff.find({
+        employee: { $in: employeeIds },
+        date: today,
+        status: { $in: ['approved', 'used', 'earned'] },
+      }).lean(),
+    ]);
 
-    // ── 5. Fetch combo offs for today ──────────────────────────────────
-    const comboOffs = await ComboOff.find({
-      employee: { $in: employeeIds },
-      date: today,
-      status: { $in: ['approved', 'used', 'earned'] },
-    }).lean();
-
-    const comboOffMap = new Map(
-      comboOffs.map((c) => [c.employee.toString(), c])
-    );
-
-    // ── 6. Build attendance map ────────────────────────────────────────
     const attendanceMap = new Map(
-      attendanceRecords.map((record) => [
-        record.employee._id.toString(),
-        record,
-      ])
+      attendanceRecords.map((r) => [r.employee.toString(), r])
     );
+    const leaveMap = new Map(leaves.map((l) => [l.employee.toString(), l]));
+    const comboOffMap = new Map(comboOffs.map((c) => [c.employee.toString(), c]));
 
     const todayAttendance = [];
 
-    // ── 7. Process each employee ───────────────────────────────────────
     for (const employee of employees) {
       const empId = employee._id.toString();
       const record = attendanceMap.get(empId);
@@ -1273,7 +1820,7 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
       const comboOff = comboOffMap.get(empId);
 
       const weekendType = employee.weekendType || 'sunday';
-      const day = today.getDay(); // 0 = Sunday, 6 = Saturday
+      const day = getISTDay(today);
       const isWeekend =
         (weekendType === 'sunday' && day === 0) ||
         (weekendType === 'saturday_sunday' && (day === 0 || day === 6));
@@ -1287,7 +1834,7 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
         role: employee.role,
       };
 
-      // Priority: Combo Off → Leave → Weekend → Attendance → Absent
+      // Priority: Combo Off → Leave → Attendance → Holiday → Weekend → Absent
       if (comboOff) {
         todayAttendance.push({
           employee: baseEmployee,
@@ -1309,30 +1856,20 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
           workHours: 0,
           isLate: false,
         });
-      } else if (isWeekend) {
-        todayAttendance.push({
-          employee: baseEmployee,
-          status: 'weekly-off',
-          checkIn: null,
-          checkOut: null,
-          workHours: 0,
-          isLate: false,
-        });
-      } else if (record) {
+      } else if (record && record.checkIn?.time) {
+        // ✅ Real punch wins over holiday/weekend
         todayAttendance.push({
           employee: baseEmployee,
           status: record.status || 'present',
-          checkIn: record.checkIn
-            ? {
-                time: formatISTTime(record.checkIn.time),
-                rawTime: record.checkIn.time,
-                location: record.checkIn.location,
-                deviceInfo: record.checkIn.deviceInfo,
-                punchedFrom: record.checkIn.punchedFrom,
-                verificationMethod: record.checkIn.verificationMethod,
-              }
-            : null,
-          checkOut: record.checkOut
+          checkIn: {
+            time: formatISTTime(record.checkIn.time),
+            rawTime: record.checkIn.time,
+            location: record.checkIn.location,
+            deviceInfo: record.checkIn.deviceInfo,
+            punchedFrom: record.checkIn.punchedFrom,
+            verificationMethod: record.checkIn.verificationMethod,
+          },
+          checkOut: record.checkOut?.time
             ? {
                 time: formatISTTime(record.checkOut.time),
                 rawTime: record.checkOut.time,
@@ -1348,6 +1885,32 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
           isShortAttendance: record.isShortAttendance || false,
           shortByMinutes: record.shortByMinutes || 0,
           missedCheckout: record.missedCheckout || false,
+
+          // Context badges
+          holidayName: holiday?.name || null,
+          holidayCategory: holiday?.category || null,
+          isRestrictedHoliday: holiday?.category === 'Restricted',
+          isWeeklyOffWork: isWeekend,
+        });
+      } else if (holiday) {
+        todayAttendance.push({
+          employee: baseEmployee,
+          status: 'holiday',
+          holidayName: holiday.name,
+          holidayCategory: holiday.category,
+          checkIn: null,
+          checkOut: null,
+          workHours: 0,
+          isLate: false,
+        });
+      } else if (isWeekend) {
+        todayAttendance.push({
+          employee: baseEmployee,
+          status: 'weekly-off',
+          checkIn: null,
+          checkOut: null,
+          workHours: 0,
+          isLate: false,
         });
       } else {
         todayAttendance.push({
@@ -1361,33 +1924,25 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
       }
     }
 
-    // ── 8. Stats ───────────────────────────────────────────────────────
-    const presentCount = todayAttendance.filter(
-      (a) => a.status === 'present'
-    ).length;
-    const absentCount = todayAttendance.filter(
-      (a) => a.status === 'absent'
-    ).length;
-    const onLeaveCount = todayAttendance.filter(
-      (a) => a.status === 'on-leave'
-    ).length;
-    const weeklyOffCount = todayAttendance.filter(
-      (a) => a.status === 'weekly-off'
-    ).length;
-    const comboOffCount = todayAttendance.filter(
-      (a) => a.status === 'combo-off'
-    ).length;
-    const lateCount = todayAttendance.filter((a) => a.isLate).length;
+    const presentCount    = todayAttendance.filter(a => a.status === 'present').length;
+    const absentCount     = todayAttendance.filter(a => a.status === 'absent').length;
+    const onLeaveCount    = todayAttendance.filter(a => a.status === 'on-leave').length;
+    const weeklyOffCount  = todayAttendance.filter(a => a.status === 'weekly-off').length;
+    const comboOffCount   = todayAttendance.filter(a => a.status === 'combo-off').length;
+    const holidayCount    = todayAttendance.filter(a => a.status === 'holiday').length;
+    const lateCount       = todayAttendance.filter(a => a.isLate).length;
 
     res.status(200).json({
       success: true,
-      date: moment(today).format('YYYY-MM-DD'),
+      date: moment(today).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+      holiday: holiday ? { name: holiday.name, category: holiday.category } : null,
       totalEmployees: employees.length,
       presentCount,
       absentCount,
       onLeaveCount,
       weeklyOffCount,
       comboOffCount,
+      holidayCount,
       lateCount,
       attendance: todayAttendance,
     });
@@ -1397,16 +1952,12 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
   }
 };
 
-
-
 exports.getAllEmployeesAttendance = async (req, res) => {
   try {
     const { department, date } = req.query;
 
-    // ── 1. Resolve target date (IST midnight) ──────────────────────────
     let targetDate;
     if (date) {
-      // Parse as IST date explicitly
       const parsed = moment.tz(date, 'YYYY-MM-DD', 'Asia/Kolkata');
       if (!parsed.isValid()) {
         return res.status(400).json({
@@ -1419,8 +1970,7 @@ exports.getAllEmployeesAttendance = async (req, res) => {
       targetDate = getISTMidnight();
     }
 
-    // ── 2. Fetch employees (with optional role filter) ─────────────────
-    const rolesToInclude = ['employee', 'manager', 'hr']; // adjust as needed
+    const rolesToInclude = ['employee', 'manager', 'hr'];
     const employeeQuery = { isActive: true, role: { $in: rolesToInclude } };
     if (department) employeeQuery.department = department;
 
@@ -1441,37 +1991,22 @@ exports.getAllEmployeesAttendance = async (req, res) => {
 
     const employeeIds = employees.map((e) => e._id);
 
-    // ── 3. Holiday check ───────────────────────────────────────────────
+    // Holiday — no early return, treat as context
     const holiday = await Holiday.findOne({
-      date: targetDate,
+      date: { $gte: targetDate, $lt: new Date(targetDate.getTime() + 86400000) },
       isActive: true,
     }).lean();
 
-    if (holiday) {
-      return res.status(200).json({
-        success: true,
-        message: `Holiday: ${holiday.name}`,
-        holidayName: holiday.name,
-        date: moment(targetDate).tz('Asia/Kolkata').format('YYYY-MM-DD'),
-        attendance: [],
-        totalEmployees: employees.length,
-        presentCount: 0,
-      });
-    }
-
-    // ── 4. Fetch attendance, leaves, combo offs in parallel ────────────
     const [attendanceRecords, leaves, comboOffs] = await Promise.all([
       Attendance.find({
         date: targetDate,
         employee: { $in: employeeIds },
-      })
-        .populate('employee', 'firstName lastName employeeId email department role')
-        .lean(),
+      }).lean(),
 
       Leave.find({
         employee: { $in: employeeIds },
         fromDate: { $lte: targetDate },
-        toDate: { $gte: targetDate },
+        toDate:   { $gte: targetDate },
         status: 'approved',
       }).lean(),
 
@@ -1482,17 +2017,17 @@ exports.getAllEmployeesAttendance = async (req, res) => {
       }).lean(),
     ]);
 
-    // ── 5. Build lookup maps ───────────────────────────────────────────
     const attendanceMap = new Map(
-      attendanceRecords.map((r) => [r.employee._id.toString(), r])
+      attendanceRecords.map((r) => [r.employee.toString(), r])
     );
     const leaveMap = new Map(leaves.map((l) => [l.employee.toString(), l]));
     const comboOffMap = new Map(comboOffs.map((c) => [c.employee.toString(), c]));
 
-    // ── 6. Determine IST weekday ───────────────────────────────────────
-    const dayIST = getISTDay(targetDate); // 0 = Sun, 6 = Sat
+    const dayIST = getISTDay(targetDate);
+    const isToday =
+      moment(targetDate).tz('Asia/Kolkata').format('YYYY-MM-DD') ===
+      moment().tz('Asia/Kolkata').format('YYYY-MM-DD');
 
-    // ── 7. Build attendance list ───────────────────────────────────────
     const attendanceList = employees.map((employee) => {
       const empId = employee._id.toString();
       const record = attendanceMap.get(empId);
@@ -1513,7 +2048,7 @@ exports.getAllEmployeesAttendance = async (req, res) => {
         role: employee.role,
       };
 
-      // Priority: Combo Off → Leave → Weekend → Attendance → Absent
+      // Priority: Combo Off → Leave → Attendance → Holiday → Weekend → Absent
       if (comboOff) {
         return {
           employee: baseEmployee,
@@ -1539,41 +2074,29 @@ exports.getAllEmployeesAttendance = async (req, res) => {
         };
       }
 
-      if (isWeekend) {
-        return {
-          employee: baseEmployee,
-          status: 'weekly-off',
-          checkIn: null,
-          checkOut: null,
-          workHours: 0,
-          isLate: false,
-        };
-      }
-
-      if (record) {
-        // For past dates use stored workHours; for today compute live
-        const isToday =
-          moment(targetDate).tz('Asia/Kolkata').format('YYYY-MM-DD') ===
-          moment().tz('Asia/Kolkata').format('YYYY-MM-DD');
+      if (record && record.checkIn?.time) {
+        // ✅ Real punch wins
         const workHours = isToday
           ? getCurrentWorkHours(record)
-          : record.workHours || 0;
+          : (record.checkOut?.time
+              ? computeWorkHours(record.checkIn.time, record.checkOut.time)
+              : record.workHours || 0);
+
+        const missedCheckout = !isToday && !record.checkOut?.time;
 
         return {
           employee: baseEmployee,
           status: record.status || 'present',
-          checkIn: record.checkIn
-            ? {
-                time: formatISTTime(record.checkIn.time),
-                rawTime: record.checkIn.time,
-                location: record.checkIn.location,
-                deviceInfo: record.checkIn.deviceInfo,
-                punchedFrom: record.checkIn.punchedFrom,
-                verificationMethod: record.checkIn.verificationMethod,
-                isGpsBypassed: record.checkIn.isGpsBypassed,
-              }
-            : null,
-          checkOut: record.checkOut
+          checkIn: {
+            time: formatISTTime(record.checkIn.time),
+            rawTime: record.checkIn.time,
+            location: record.checkIn.location,
+            deviceInfo: record.checkIn.deviceInfo,
+            punchedFrom: record.checkIn.punchedFrom,
+            verificationMethod: record.checkIn.verificationMethod,
+            isGpsBypassed: record.checkIn.isGpsBypassed,
+          },
+          checkOut: record.checkOut?.time
             ? {
                 time: formatISTTime(record.checkOut.time),
                 rawTime: record.checkOut.time,
@@ -1585,11 +2108,41 @@ exports.getAllEmployeesAttendance = async (req, res) => {
               }
             : null,
           workHours,
+          missedCheckout,
           isLate: record.isLate || false,
           lateBy: record.lateBy || 0,
           isShortAttendance: record.isShortAttendance || false,
           shortByMinutes: record.shortByMinutes || 0,
-          missedCheckout: record.missedCheckout || false,
+
+          // Context badges
+          holidayName: holiday?.name || null,
+          holidayCategory: holiday?.category || null,
+          isRestrictedHoliday: holiday?.category === 'Restricted',
+          isWeeklyOffWork: isWeekend,
+        };
+      }
+
+      if (holiday) {
+        return {
+          employee: baseEmployee,
+          status: 'holiday',
+          holidayName: holiday.name,
+          holidayCategory: holiday.category,
+          checkIn: null,
+          checkOut: null,
+          workHours: 0,
+          isLate: false,
+        };
+      }
+
+      if (isWeekend) {
+        return {
+          employee: baseEmployee,
+          status: 'weekly-off',
+          checkIn: null,
+          checkOut: null,
+          workHours: 0,
+          isLate: false,
         };
       }
 
@@ -1603,7 +2156,6 @@ exports.getAllEmployeesAttendance = async (req, res) => {
       };
     });
 
-    // ── 8. Stats ───────────────────────────────────────────────────────
     const stats = {
       totalEmployees: employees.length,
       presentCount: attendanceList.filter((a) => a.status === 'present').length,
@@ -1611,12 +2163,14 @@ exports.getAllEmployeesAttendance = async (req, res) => {
       onLeaveCount: attendanceList.filter((a) => a.status === 'on-leave').length,
       weeklyOffCount: attendanceList.filter((a) => a.status === 'weekly-off').length,
       comboOffCount: attendanceList.filter((a) => a.status === 'combo-off').length,
+      holidayCount: attendanceList.filter((a) => a.status === 'holiday').length,
       lateCount: attendanceList.filter((a) => a.isLate).length,
     };
 
     res.status(200).json({
       success: true,
       date: moment(targetDate).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+      holiday: holiday ? { name: holiday.name, category: holiday.category } : null,
       ...stats,
       attendance: attendanceList,
     });

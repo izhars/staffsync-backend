@@ -1,13 +1,11 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-
-// Store active calls and peer connections
-const activeCalls = new Map(); // callId → { participants, metadata }
-const peerConnections = new Map(); // socketId → { callId, userId, peerId }
-const userCallStatus = new Map(); // userId → { inCall, currentCallId }
+const activeCalls = new Map();
+const peerConnections = new Map(); 
+const userCallStatus = new Map();
 
 // Room management
-const activeRooms = new Map(); // roomId → { participants, metadata }
+const activeRooms = new Map();
 
 let callNamespace = null;
 
@@ -30,17 +28,6 @@ function initCallSocket(io) {
 
   // Authentication middleware for call namespace
   callNamespace.use(async (socket, next) => {
-    // const connectionId = Date.now();
-    // console.log(`📞 Call socket connection attempt [${socket.id}]:`, {
-    //   connectionId,
-    //   handshake: {
-    //     auth: socket.handshake.auth,
-    //     query: socket.handshake.query,
-    //     headers: socket.handshake.headers
-    //   },
-    //   time: new Date().toISOString()
-    // });
-
     const token = socket.handshake.auth?.token || 
                   socket.handshake.query?.token ||
                   socket.handshake.headers?.authorization?.replace('Bearer ', '');

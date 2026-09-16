@@ -8,8 +8,6 @@ const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 exports.addHoliday = async (req, res) => {
   try {
     let holidays = req.body;
-
-    // Ensure holidays is an array
     if (!Array.isArray(holidays)) holidays = [holidays];
 
     const createdHolidays = [];
@@ -20,12 +18,32 @@ exports.addHoliday = async (req, res) => {
 
     try {
       for (const h of holidays) {
-        const { name, date, description, type = 'Festival' } = h;
+        const {
+          name, date, description,
+          type = 'Festival',
+          category = 'Mandatory',  // ✅ NEW
+          maxAllowed = null,        // ✅ NEW
+          applicableTo = ['all']    // ✅ NEW
+        } = h;
 
         // Validate required fields
         if (!name || !date) {
           errors.push(`Holiday "${name || 'unknown'}": Name and date are required`);
           continue;
+        }
+
+        // ✅ Validate category
+        if (!['Mandatory', 'Restricted'].includes(category)) {
+          errors.push(`Holiday "${name}": Category must be 'Mandatory' or 'Restricted'`);
+          continue;
+        }
+
+        // ✅ Validate maxAllowed for restricted holidays
+        if (category === 'Restricted' && maxAllowed !== null) {
+          if (!Number.isInteger(maxAllowed) || maxAllowed < 1) {
+            errors.push(`Holiday "${name}": maxAllowed must be a positive integer`);
+            continue;
+          }
         }
 
         const parsedDate = new Date(date);
@@ -35,8 +53,8 @@ exports.addHoliday = async (req, res) => {
         }
 
         // Check if holiday already exists on this date
-        const existing = await Holiday.findOne({ 
-          date: parsedDate 
+        const existing = await Holiday.findOne({
+          date: parsedDate
         }).session(session);
 
         if (existing) {
@@ -48,7 +66,11 @@ exports.addHoliday = async (req, res) => {
           name,
           date: parsedDate,
           description,
-          type
+          type,
+          category,           // ✅ NEW
+          maxAllowed: category === 'Restricted' ? maxAllowed : null, // ✅ NEW
+          applicableTo,       // ✅ NEW
+          createdBy: req.user?._id // ✅ NEW
         }], { session });
 
         createdHolidays.push(holiday[0]);
@@ -84,39 +106,32 @@ exports.addHoliday = async (req, res) => {
 // Get all holidays with filtering and pagination
 exports.getHolidays = async (req, res) => {
   try {
-    const { year, month, type, isActive, search } = req.query;
-
+    const { year, month, type, category, isActive, search } = req.query; // ✅ added category
     const filter = {};
 
-    // ✅ isActive filter
     if (isActive !== undefined) {
       filter.isActive = isActive === 'true' || isActive === '1';
     }
 
-    // ✅ Year filter
     if (year) {
       const startYear = new Date(parseInt(year), 0, 1);
       const endYear = new Date(parseInt(year) + 1, 0, 1);
       filter.date = { $gte: startYear, $lt: endYear };
     }
 
-    // ✅ Month filter (requires year)
     if (month && year) {
       const startMonth = new Date(parseInt(year), parseInt(month) - 1, 1);
-      const endMonth = new Date(parseInt(year), parseInt(month), 1); // first day of next month
-      filter.date = {
-        ...filter.date,
-        $gte: startMonth,
-        $lt: endMonth
-      };
+      const endMonth = new Date(parseInt(year), parseInt(month), 1);
+      filter.date = { ...filter.date, $gte: startMonth, $lt: endMonth };
     }
 
-    // ✅ Type filter
-    if (type) {
-      filter.type = type;
+    if (type) filter.type = type;
+
+    // ✅ NEW: Category filter
+    if (category) {
+      filter.category = category;
     }
 
-    // ✅ Search filter
     if (search) {
       filter.$or = [
         { name: { $regex: search, $options: 'i' } },
@@ -126,7 +141,6 @@ exports.getHolidays = async (req, res) => {
 
     console.log('Holiday filter:', filter);
 
-    // ✅ Fetch all holidays without pagination
     const holidays = await Holiday.find(filter)
       .sort({ date: 1 })
       .select('-__v');
@@ -135,13 +149,7 @@ exports.getHolidays = async (req, res) => {
       success: true,
       count: holidays.length,
       data: holidays,
-      filters: {
-        year,
-        month,
-        type,
-        search,
-        isActive
-      }
+      filters: { year, month, type, category, search, isActive }
     });
   } catch (error) {
     console.error('Get holidays error:', error);
@@ -152,7 +160,6 @@ exports.getHolidays = async (req, res) => {
     });
   }
 };
-
 
 // Get holidays for a specific year
 exports.getHolidaysByYear = async (req, res) => {
@@ -167,7 +174,7 @@ exports.getHolidaysByYear = async (req, res) => {
     const startDate = new Date(parseInt(year), 0, 1);
     const endDate = new Date(parseInt(year) + 1, 0, 1);
 
-    let filter = { 
+    let filter = {
       date: { $gte: startDate, $lt: endDate },
       isActive: true
     };
@@ -209,8 +216,8 @@ exports.getUpcomingHolidays = async (req, res) => {
       date: { $gte: today, $lte: thirtyDaysFromNow },
       isActive: true
     })
-    .sort({ date: 1 })
-    .select('-__v');
+      .sort({ date: 1 })
+      .select('-__v');
 
     res.json({
       period: {
@@ -242,8 +249,8 @@ exports.getHolidaysByType = async (req, res) => {
       type,
       isActive: true
     })
-    .sort({ date: 1 })
-    .select('-__v');
+      .sort({ date: 1 })
+      .select('-__v');
 
     res.json({
       type,
@@ -260,7 +267,7 @@ exports.getHolidaysByType = async (req, res) => {
 exports.getHolidayById = async (req, res) => {
   try {
     const holiday = await Holiday.findById(req.params.id);
-    
+
     if (!holiday) {
       return res.status(404).json({ message: 'Holiday not found' });
     }
@@ -278,7 +285,28 @@ exports.updateHoliday = async (req, res) => {
     const { id } = req.params;
     const updateData = req.body;
 
-    // Validate date if provided
+    // ✅ Validate category if provided
+    if (updateData.category &&
+      !['Mandatory', 'Restricted'].includes(updateData.category)) {
+      return res.status(400).json({
+        message: "Category must be 'Mandatory' or 'Restricted'"
+      });
+    }
+
+    // ✅ If changing to Mandatory, clear maxAllowed
+    if (updateData.category === 'Mandatory') {
+      updateData.maxAllowed = null;
+    }
+
+    // ✅ Validate maxAllowed for restricted
+    if (updateData.category === 'Restricted' && updateData.maxAllowed !== null) {
+      if (!Number.isInteger(updateData.maxAllowed) || updateData.maxAllowed < 1) {
+        return res.status(400).json({
+          message: 'maxAllowed must be a positive integer for Restricted holidays'
+        });
+      }
+    }
+
     if (updateData.date) {
       const parsedDate = new Date(updateData.date);
       if (isNaN(parsedDate.getTime())) {
@@ -286,7 +314,6 @@ exports.updateHoliday = async (req, res) => {
       }
       updateData.date = parsedDate;
 
-      // Check for date conflict
       const existing = await Holiday.findOne({
         date: updateData.date,
         _id: { $ne: id }
@@ -301,14 +328,8 @@ exports.updateHoliday = async (req, res) => {
 
     const holiday = await Holiday.findByIdAndUpdate(
       id,
-      { 
-        ...updateData,
-        updatedAt: new Date()
-      },
-      { 
-        new: true, 
-        runValidators: true 
-      }
+      { ...updateData, updatedAt: new Date() },
+      { new: true, runValidators: true }
     );
 
     if (!holiday) {
@@ -411,8 +432,14 @@ exports.bulkImportHolidays = async (req, res) => {
               name: data.name?.trim(),
               date: new Date(data.date),
               description: data.description?.trim() || '',
-              type: data.type?.trim() || 'Festival'
+              type: data.type?.trim() || 'Festival',
+              category: data.category?.trim() || 'Mandatory',   // ✅ NEW
+              maxAllowed: data.maxAllowed ? parseInt(data.maxAllowed) : null, // ✅ NEW
+              applicableTo: data.applicableTo
+                ? data.applicableTo.split(',').map(s => s.trim())
+                : ['all']                                        // ✅ NEW
             };
+
 
             if (holidayData.name && !isNaN(holidayData.date.getTime())) {
               results.push(holidayData);
@@ -441,7 +468,10 @@ exports.bulkImportHolidays = async (req, res) => {
               name: item.name?.trim(),
               date: new Date(item.date),
               description: item.description?.trim() || '',
-              type: item.type?.trim() || 'Festival'
+              type: item.type?.trim() || 'Festival',
+              category: item.category?.trim() || 'Mandatory',  // ✅ NEW
+              maxAllowed: item.maxAllowed || null,              // ✅ NEW
+              applicableTo: item.applicableTo || ['all']        // ✅ NEW
             };
             if (holidayData.name && !isNaN(holidayData.date.getTime())) {
               results.push(holidayData);
@@ -509,7 +539,7 @@ exports.bulkImportHolidays = async (req, res) => {
 exports.exportHolidays = async (req, res) => {
   try {
     const { format = 'csv', year } = req.query;
-    
+
     let filter = { isActive: true };
     if (year) {
       const startDate = new Date(parseInt(year), 0, 1);
@@ -562,6 +592,90 @@ exports.exportHolidays = async (req, res) => {
   }
 };
 
+// ✅ NEW: Get holidays by category (Mandatory / Restricted)
+exports.getHolidaysByCategory = async (req, res) => {
+  try {
+    const { category } = req.params;
+    const { year } = req.query;
+
+    const validCategories = ['Mandatory', 'Restricted'];
+    if (!validCategories.includes(category)) {
+      return res.status(400).json({
+        message: `Invalid category. Must be one of: ${validCategories.join(', ')}`
+      });
+    }
+
+    const filter = { category, isActive: true };
+
+    if (year) {
+      const startDate = new Date(parseInt(year), 0, 1);
+      const endDate = new Date(parseInt(year) + 1, 0, 1);
+      filter.date = { $gte: startDate, $lt: endDate };
+    }
+
+    const holidays = await Holiday.find(filter)
+      .sort({ date: 1 })
+      .select('-__v');
+
+    res.json({
+      success: true,
+      category,
+      year: year || 'All',
+      count: holidays.length,
+      data: holidays
+    });
+  } catch (error) {
+    console.error('Get holidays by category error:', error);
+    res.status(500).json({
+      message: 'Failed to fetch holidays by category',
+      error: error.message
+    });
+  }
+};
+
+// ✅ NEW: Get restricted holiday summary
+exports.getRestrictedHolidaySummary = async (req, res) => {
+  try {
+    const { year = new Date().getFullYear() } = req.query;
+
+    const startDate = new Date(parseInt(year), 0, 1);
+    const endDate = new Date(parseInt(year) + 1, 0, 1);
+
+    const restrictedHolidays = await Holiday.find({
+      category: 'Restricted',
+      isActive: true,
+      date: { $gte: startDate, $lt: endDate }
+    }).sort({ date: 1 }).select('-__v');
+
+    const mandatoryHolidays = await Holiday.find({
+      category: 'Mandatory',
+      isActive: true,
+      date: { $gte: startDate, $lt: endDate }
+    }).sort({ date: 1 }).select('-__v');
+
+    res.json({
+      success: true,
+      year: parseInt(year),
+      summary: {
+        totalMandatory: mandatoryHolidays.length,
+        totalRestricted: restrictedHolidays.length,
+        // Max selectable restricted (highest maxAllowed among restricted)
+        maxSelectable: restrictedHolidays.reduce(
+          (max, h) => Math.max(max, h.maxAllowed || 0), 0
+        )
+      },
+      mandatory: mandatoryHolidays,
+      restricted: restrictedHolidays
+    });
+  } catch (error) {
+    console.error('Get restricted holiday summary error:', error);
+    res.status(500).json({
+      message: 'Failed to fetch restricted holiday summary',
+      error: error.message
+    });
+  }
+};
+
 // Get holiday statistics
 exports.getHolidayStats = async (req, res) => {
   try {
@@ -574,67 +688,27 @@ exports.getHolidayStats = async (req, res) => {
       matchStage.date = { $gte: startDate, $lt: endDate };
     }
 
-    const stats = await Holiday.aggregate([
+    // ✅ Stats by type
+    const typeStats = await Holiday.aggregate([
       { $match: matchStage },
-      {
-        $group: {
-          _id: '$type',
-          count: { $sum: 1 },
-          holidays: { $push: { name: '$name', date: '$date' } }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: '$count' },
-          byType: { 
-            $push: { 
-              type: '$_id', 
-              count: '$count',
-              sample: { $arrayElemAt: ['$holidays', 0] }
-            } 
-          }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          totalHolidays: '$total',
-          byType: 1,
-          year: year || 'All'
-        }
-      }
+      { $group: { _id: '$type', count: { $sum: 1 } } },
+      { $project: { _id: 0, type: '$_id', count: 1 } }
     ]);
 
-    // Get date distribution
-    const dateStats = await Holiday.aggregate([
+    // ✅ NEW: Stats by category
+    const categoryStats = await Holiday.aggregate([
       { $match: matchStage },
-      {
-        $group: {
-          _id: { 
-            $dateToString: { 
-              format: '%m', 
-              date: '$date' 
-            } 
-          },
-          count: { $sum: 1 }
-        }
-      },
-      {
-        $sort: { _id: 1 }
-      },
-      {
-        $project: {
-          _id: 0,
-          month: { $toInt: '$_id' },
-          count: 1
-        }
-      }
+      { $group: { _id: '$category', count: { $sum: 1 } } },
+      { $project: { _id: 0, category: '$_id', count: 1 } }
     ]);
+
+    const total = await Holiday.countDocuments(matchStage);
 
     res.json({
-      stats: stats[0] || { totalHolidays: 0, byType: [] },
-      dateDistribution: dateStats,
+      year: year || 'All',
+      totalHolidays: total,
+      byCategory: categoryStats,   // ✅ NEW
+      byType: typeStats,
       generatedAt: new Date().toISOString()
     });
   } catch (error) {

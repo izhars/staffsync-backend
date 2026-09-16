@@ -64,8 +64,6 @@ exports.protect = async (req, res, next) => {
 // 🧩 Role Authorization
 exports.authorize = (...roles) => {
   return (req, res, next) => {
-    console.log(`👮 Role Check -> User Role: ${req.user.role}, Allowed: ${roles.join(', ')}`);
-
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({
         success: false,

@@ -18,7 +18,7 @@ const punchSubSchema = new mongoose.Schema(
     location: { type: locationSubSchema, default: {} },
     deviceInfo: String,
 
-    // ── NEW audit fields ─────────────────────────────────────────────
+    // ── Audit fields ─────────────────────────────────────────────────
     punchedFrom: {
       type: String,
       enum: ['mobile', 'desktop'],
@@ -27,16 +27,25 @@ const punchSubSchema = new mongoose.Schema(
     verificationMethod: {
       type: String,
       enum: [
-        'GPS',                     // normal mobile GPS inside fence
-        'OFFICE_NETWORK',          // HR/Admin desktop on office IP
-        'BYPASS_PRIVILEGED',       // HR/Admin with GPS but outside fence
-        'BYPASS_NO_GPS_PRIVILEGED' // HR/Admin desktop, IP check skipped (dev/staging)
+        'GPS',                      // normal mobile GPS inside fence
+        'OFFICE_NETWORK',           // HR/Admin desktop on office IP
+        'BYPASS_PRIVILEGED',        // HR/Admin with GPS but outside fence
+        'BYPASS_NO_GPS_PRIVILEGED', // HR/Admin desktop, IP check skipped
+        'FACE_GPS',                 // face verified + geo-fence passed
+        'FACE_ONLY',                // face verified, no GPS (HR override)
       ],
       default: 'GPS',
     },
     isGpsBypassed: { type: Boolean, default: false },
     bypassReason: String,
     clientIp: String,
+
+    // ── Face recognition audit ───────────────────────────────────────
+    faceVerified: { type: Boolean, default: false },
+    faceSimilarity: { type: Number, default: null },
+    faceThreshold: { type: Number, default: null },
+    faceModel: { type: String, default: null },
+    faceLivenessPassed: { type: Boolean, default: false },
   },
   { _id: false }
 );

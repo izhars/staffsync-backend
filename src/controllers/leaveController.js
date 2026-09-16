@@ -3,6 +3,7 @@ const User = require('../models/User');
 const Attendance = require('../models/Attendance');
 const Holiday = require('../models/Holiday');
 const Notification = require('../models/Notification');
+const RestrictedHolidayUsage = require('../models/RestrictedHolidayUsage');
 
 // ====================================
 // HELPER: Can current user act on leave?
@@ -37,7 +38,7 @@ const sendRoleBasedNotification = async (data) => {
   if (Array.isArray(targetUsers) && targetUsers.length > 0) {
     // Get user roles for each target user
     const users = await User.find({ _id: { $in: targetUsers } }).select('_id role');
-    
+
     notifications.push(...users.map(user => ({
       title,
       message,
@@ -86,7 +87,7 @@ const sendRoleBasedNotification = async (data) => {
 
   if (notifications.length > 0) {
     await Notification.insertMany(notifications);
-    
+
     // Emit socket events if needed
     // if (global.io) {
     //   notifications.forEach(n => {
@@ -181,24 +182,44 @@ exports.applyLeave = async (req, res) => {
       }
     }
 
-    // === Fetch holidays in range ===
+    // === Fetch ALL holidays in range (with full details) ===
     const holidays = await Holiday.find({
       date: { $gte: start, $lte: end },
       isActive: true
-    }).select('date');
-    const holidayDates = holidays.map(h => h.date.toDateString());
+    });
 
-    // === Filter leave days to exclude holidays ===
+    // Separate by category
+    const mandatoryHolidays = holidays.filter(h => h.category === 'Mandatory');
+    const restrictedHolidays = holidays.filter(h => h.category === 'Restricted');
+    const mandatoryDates = mandatoryHolidays.map(h => h.date.toDateString());
+    const restrictedDates = restrictedHolidays.map(h => h.date.toDateString());
+
+    console.log('[Leave] Mandatory holidays in range:', mandatoryDates);
+    console.log('[Leave] Restricted holidays in range:', restrictedDates);
+
+    // === Fetch user & probation check ===
+    const user = await User.findById(req.user.id);
+    const today = new Date();
+    if (user.probationEndDate && today < new Date(user.probationEndDate)
+      && leaveType !== 'unpaid' && leaveType !== 'combo') {
+      return res.status(400).json({
+        success: false,
+        message: 'You are on probation. Paid leaves are locked. Only unpaid or combo leave can be applied.'
+      });
+    }
+
+    // === Build leaveDays: exclude MANDATORY holidays only ===
+    // Restricted holidays are kept so they count against quota
     let leaveDays = [];
     if (leaveDuration === 'full') {
       for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-        if (!holidayDates.includes(d.toDateString())) {
+        if (!mandatoryDates.includes(d.toDateString())) {
           leaveDays.push(new Date(d));
         }
       }
     } else {
-      // Half-day leave: check if it's a holiday
-      if (!holidayDates.includes(start.toDateString())) {
+      // Half-day: check if the single date is a mandatory holiday
+      if (!mandatoryDates.includes(start.toDateString())) {
         leaveDays.push(new Date(start));
       }
     }
@@ -206,8 +227,66 @@ exports.applyLeave = async (req, res) => {
     if (leaveDays.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'All selected dates are holidays. Leave cannot be applied.'
+        message: 'All selected dates are mandatory holidays. Leave cannot be applied.'
       });
+    }
+
+    // === Restricted Holiday Quota Check ===
+    // Find which restricted holidays the user is trying to take leave on
+    const restrictedDatesInLeave = leaveDays
+      .map(d => d.toDateString())
+      .filter(ds => restrictedDates.includes(ds));
+
+    if (restrictedDatesInLeave.length > 0) {
+      const currentYear = new Date(start).getFullYear();
+
+      for (const rhDateStr of restrictedDatesInLeave) {
+        // Find the Holiday doc for this date
+        const rh = restrictedHolidays.find(
+          h => h.date.toDateString() === rhDateStr
+        );
+        if (!rh) continue;
+
+        // Check eligibility
+        if (
+          rh.applicableTo &&
+          !rh.applicableTo.includes('all') &&
+          !rh.applicableTo.includes(user.role)
+        ) {
+          return res.status(403).json({
+            success: false,
+            message: `You are not eligible for the restricted holiday: ${rh.name} (${rhDateStr})`
+          });
+        }
+
+        // Check if user already availed this specific holiday
+        const existingUsageForThisHoliday = await RestrictedHolidayUsage.findOne({
+          employee: req.user.id,
+          holiday: rh._id
+        });
+
+        if (existingUsageForThisHoliday) {
+          return res.status(400).json({
+            success: false,
+            message: `You have already availed the restricted holiday: ${rh.name}`
+          });
+        }
+
+        // Quota check
+        const quota = rh.maxAllowed && rh.maxAllowed > 0 ? rh.maxAllowed : 2;
+
+        const usedCount = await RestrictedHolidayUsage.countDocuments({
+          employee: req.user.id,
+          year: currentYear
+        });
+
+        if (usedCount >= quota) {
+          return res.status(400).json({
+            success: false,
+            message: `You have exhausted your restricted holiday quota for ${currentYear} (${usedCount}/${quota} used). Cannot apply leave on ${rh.name}.`
+          });
+        }
+      }
     }
 
     // === Check for overlapping full-day leaves ===
@@ -254,7 +333,9 @@ exports.applyLeave = async (req, res) => {
 
     if (attendance.length > 0) {
       if (leaveDuration === 'half') {
-        const att = attendance.find(a => new Date(a.date).toDateString() === start.toDateString());
+        const att = attendance.find(
+          a => new Date(a.date).toDateString() === start.toDateString()
+        );
         if (att && halfDayType === 'first_half') {
           return res.status(400).json({
             success: false,
@@ -270,18 +351,8 @@ exports.applyLeave = async (req, res) => {
       }
     }
 
-    // === Fetch user & probation check ===
-    const user = await User.findById(req.user.id);
-    const today = new Date();
-    if (user.probationEndDate && today < new Date(user.probationEndDate)
-      && leaveType !== 'unpaid' && leaveType !== 'combo') {
-      return res.status(400).json({
-        success: false,
-        message: 'You are on probation. Paid leaves are locked. Only unpaid or combo leave can be applied.'
-      });
-    }
-
-    // === Calculate totalDays, excluding holidays ===
+    // === Calculate totalDays, excluding MANDATORY holidays ===
+    // Pass mandatoryDates to getWorkingDays so restricted holidays still count
     let totalDays;
     try {
       totalDays = await getWorkingDays(
@@ -290,7 +361,7 @@ exports.applyLeave = async (req, res) => {
         leaveDuration,
         halfDayType,
         leaveType,
-        holidayDates
+        mandatoryDates
       );
     } catch (err) {
       return res.status(400).json({ success: false, message: err.message });
@@ -317,11 +388,49 @@ exports.applyLeave = async (req, res) => {
       documents: documents || []
     });
 
-    await leave.populate('employee', 'firstName lastName employeeId email role department reportingManager');
+    await leave.populate(
+      'employee',
+      'firstName lastName employeeId email role department reportingManager'
+    );
+
+    // === Record restricted holiday usage (if any) ===
+    let restrictedUsageRecorded = [];
+    if (restrictedDatesInLeave.length > 0) {
+      const currentYear = new Date(start).getFullYear();
+
+      for (const rhDateStr of restrictedDatesInLeave) {
+        const rh = restrictedHolidays.find(
+          h => h.date.toDateString() === rhDateStr
+        );
+        if (!rh) continue;
+
+        try {
+          const usage = await RestrictedHolidayUsage.create({
+            employee: req.user.id,
+            holiday: rh._id,
+            date: rh.date,
+            year: currentYear,
+            action: 'applied_leave'
+          });
+          restrictedUsageRecorded.push({
+            holidayName: rh.name,
+            date: rhDateStr
+          });
+          console.log(
+            `[Leave] ✅ Restricted holiday usage recorded: ${rh.name} for user ${req.user.id}`
+          );
+        } catch (err) {
+          // Duplicate key → already recorded (shouldn't happen due to earlier check)
+          if (err.code !== 11000) {
+            console.error('[Leave] Failed to record restricted holiday usage:', err);
+          }
+        }
+      }
+    }
 
     // === Get HR users for notification ===
     const hrUsers = await User.find({ role: 'hr', isActive: true }).select('_id');
-    
+
     // === Get manager if employee has one ===
     let managerUsers = [];
     if (user.reportingManager) {
@@ -329,48 +438,60 @@ exports.applyLeave = async (req, res) => {
       if (manager) managerUsers.push(manager._id);
     }
 
+    // === Build restricted-holiday info for notification ===
+    const restrictedInfo =
+      restrictedUsageRecorded.length > 0
+        ? ` [Includes ${restrictedUsageRecorded.length} restricted holiday: ${restrictedUsageRecorded
+          .map(r => r.holidayName)
+          .join(', ')}]`
+        : '';
+
     // === Send role-based notifications ===
-    // 1. Notify HR
+    // 1. Notify HR + manager
     await sendRoleBasedNotification({
       title: 'New Leave Application',
-      message: `${leave.employee.firstName} ${leave.employee.lastName} (${leave.employee.employeeId}) has applied for ${leave.leaveType} leave from ${leave.startDate.toDateString()} to ${leave.endDate.toDateString()} (${leave.totalDays} days).`,
+      message: `${leave.employee.firstName} ${leave.employee.lastName} (${leave.employee.employeeId}) has applied for ${leave.leaveType} leave from ${leave.startDate.toDateString()} to ${leave.endDate.toDateString()} (${leave.totalDays} days).${restrictedInfo}`,
       type: 'info',
       targetRoles: ['hr'],
-      targetUsers: managerUsers, // Also notify manager
-      meta: { 
-        leaveId: leave._id, 
+      targetUsers: managerUsers,
+      meta: {
+        leaveId: leave._id,
         applicantId: req.user.id,
         applicantName: `${leave.employee.firstName} ${leave.employee.lastName}`,
         leaveType: leave.leaveType,
         startDate: leave.startDate,
         endDate: leave.endDate,
-        totalDays: leave.totalDays
+        totalDays: leave.totalDays,
+        restrictedHolidays: restrictedUsageRecorded
       },
       createdBy: req.user._id
     });
 
-    // 2. Notify the employee that their leave was submitted
+    // 2. Notify the employee
     await sendRoleBasedNotification({
       title: 'Leave Application Submitted',
-      message: `Your ${leave.leaveType} leave application for ${leave.startDate.toDateString()} to ${leave.endDate.toDateString()} has been submitted successfully.`,
+      message: `Your ${leave.leaveType} leave application for ${leave.startDate.toDateString()} to ${leave.endDate.toDateString()} has been submitted successfully.${restrictedInfo}`,
       type: 'success',
       targetUsers: [req.user.id],
-      meta: { 
+      meta: {
         leaveId: leave._id,
         status: 'pending',
         leaveType: leave.leaveType,
         startDate: leave.startDate,
-        endDate: leave.endDate
+        endDate: leave.endDate,
+        restrictedHolidays: restrictedUsageRecorded
       },
       createdBy: req.user._id
     });
 
     res.status(201).json({
       success: true,
-      message: 'Leave applied successfully. Holidays were skipped in calculation.',
-      leave
+      message: restrictedUsageRecorded.length
+        ? `Leave applied successfully. Counted ${restrictedUsageRecorded.length} restricted holiday against your quota.`
+        : 'Leave applied successfully. Holidays were skipped in calculation.',
+      leave,
+      restrictedHolidaysUsed: restrictedUsageRecorded
     });
-
   } catch (error) {
     console.error('[Leave] Apply Leave Error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -384,7 +505,7 @@ exports.cancelLeave = async (req, res) => {
   try {
     const leave = await Leave.findById(req.params.id)
       .populate('employee', 'firstName lastName employeeId role reportingManager');
-    
+
     if (!leave) return res.status(404).json({ success: false, message: 'Leave not found' });
 
     const isEmployee = leave.employee._id.toString() === req.user.id;
@@ -418,8 +539,8 @@ exports.cancelLeave = async (req, res) => {
     await leave.save();
 
     // === Send role-based notifications ===
-    const actorName = isManagerOrAbove ? 
-      `${req.user.firstName} ${req.user.lastName} (${req.user.role})` : 
+    const actorName = isManagerOrAbove ?
+      `${req.user.firstName} ${req.user.lastName} (${req.user.role})` :
       `${leave.employee.firstName} ${leave.employee.lastName}`;
 
     // 1. Notify HR about cancellation
@@ -428,7 +549,7 @@ exports.cancelLeave = async (req, res) => {
       message: `${actorName} cancelled a ${leave.leaveType} leave application (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}). Previous status: ${oldStatus}`,
       type: 'warning',
       targetRoles: ['hr'],
-      meta: { 
+      meta: {
         leaveId: leave._id,
         applicantId: leave.employee._id,
         applicantName: `${leave.employee.firstName} ${leave.employee.lastName}`,
@@ -448,7 +569,7 @@ exports.cancelLeave = async (req, res) => {
         message: `Your ${leave.leaveType} leave application (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}) has been cancelled by ${req.user.firstName} ${req.user.lastName}. Reason: ${leave.cancellationReason}`,
         type: 'warning',
         targetUsers: [leave.employee._id],
-        meta: { 
+        meta: {
           leaveId: leave._id,
           cancelledBy: req.user.id,
           cancelledByName: `${req.user.firstName} ${req.user.lastName}`,
@@ -465,7 +586,7 @@ exports.cancelLeave = async (req, res) => {
           message: `${leave.employee.firstName} ${leave.employee.lastName} cancelled their ${leave.leaveType} leave application (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}).`,
           type: 'info',
           targetUsers: [employee.reportingManager],
-          meta: { 
+          meta: {
             leaveId: leave._id,
             employeeId: leave.employee._id,
             employeeName: `${leave.employee.firstName} ${leave.employee.lastName}`,
@@ -491,7 +612,7 @@ exports.approveLeave = async (req, res) => {
   try {
     const leave = await Leave.findById(req.params.id)
       .populate('employee', 'firstName lastName employeeId email role');
-    
+
     if (!leave)
       return res.status(404).json({ success: false, message: 'Leave not found' });
 
@@ -547,14 +668,14 @@ exports.approveLeave = async (req, res) => {
     }
 
     // === Send role-based notifications ===
-    
+
     // 1. Notify the employee
     await sendRoleBasedNotification({
       title: 'Leave Approved',
       message: `Your ${leave.leaveType} leave application (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}) has been approved by ${approver.firstName} ${approver.lastName}.`,
       type: 'success',
       targetUsers: [leave.employee._id],
-      meta: { 
+      meta: {
         leaveId: leave._id,
         approvedBy: req.user.id,
         approvedByName: `${approver.firstName} ${approver.lastName}`,
@@ -573,7 +694,7 @@ exports.approveLeave = async (req, res) => {
         message: `${approver.firstName} ${approver.lastName} (Manager) approved ${leave.employee.firstName} ${leave.employee.lastName}'s ${leave.leaveType} leave (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}).`,
         type: 'info',
         targetRoles: ['hr'],
-        meta: { 
+        meta: {
           leaveId: leave._id,
           employeeId: leave.employee._id,
           employeeName: `${leave.employee.firstName} ${leave.employee.lastName}`,
@@ -601,7 +722,7 @@ exports.rejectLeave = async (req, res) => {
     const { rejectionReason } = req.body;
     const leave = await Leave.findById(req.params.id)
       .populate('employee', 'firstName lastName employeeId email role');
-    
+
     if (!leave) return res.status(404).json({ success: false, message: 'Leave not found' });
 
     if (leave.status !== 'pending') {
@@ -629,7 +750,7 @@ exports.rejectLeave = async (req, res) => {
       message: `Your ${leave.leaveType} leave application (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}) has been rejected by ${rejecter.firstName} ${rejecter.lastName}. Reason: ${leave.rejectionReason}`,
       type: 'error',
       targetUsers: [leave.employee._id],
-      meta: { 
+      meta: {
         leaveId: leave._id,
         rejectedBy: req.user.id,
         rejectedByName: `${rejecter.firstName} ${rejecter.lastName}`,
@@ -648,7 +769,7 @@ exports.rejectLeave = async (req, res) => {
         message: `${rejecter.firstName} ${rejecter.lastName} (Manager) rejected ${leave.employee.firstName} ${leave.employee.lastName}'s ${leave.leaveType} leave. Reason: ${leave.rejectionReason}`,
         type: 'info',
         targetRoles: ['hr'],
-        meta: { 
+        meta: {
           leaveId: leave._id,
           employeeId: leave.employee._id,
           employeeName: `${leave.employee.firstName} ${leave.employee.lastName}`,
@@ -802,7 +923,19 @@ exports.getAllLeaves = async (req, res) => {
 // ---------------------------------------------------
 // Helper: count *working* days (skip Sat/Sun + holidays)
 // ---------------------------------------------------
-const getWorkingDays = async (start, end, leaveDuration, halfDayType, leaveType) => {
+// ---------------------------------------------------
+// Helper: count *working* days
+// Skips weekends (Sat/Sun) and MANDATORY holidays only.
+// Restricted holidays are COUNTED (they consume quota separately).
+// ---------------------------------------------------
+const getWorkingDays = async (
+  start,
+  end,
+  leaveDuration,
+  halfDayType,
+  leaveType,
+  mandatoryDates = []   // array of Date.toDateString() strings
+) => {
   if (!(start instanceof Date) || !(end instanceof Date) || isNaN(start) || isNaN(end)) {
     throw new Error('Invalid date range');
   }
@@ -815,35 +948,38 @@ const getWorkingDays = async (start, end, leaveDuration, halfDayType, leaveType)
   }
 
   const startDate = new Date(start.getFullYear(), start.getMonth(), start.getDate());
-  const endDate = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+  const endDate   = new Date(end.getFullYear(), end.getMonth(), end.getDate());
 
-  // Load holidays
-  const holidays = await Holiday.find({
-    date: { $gte: new Date(startDate.getFullYear(), 0, 1), $lte: new Date(endDate.getFullYear(), 11, 31) }
-  }).select('date');
-
-  const holidaySet = new Set(
-    holidays.map(h => {
-      const d = h.date;
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    })
+  // Build a Set of mandatory holiday date strings for O(1) lookup
+  // Both sides use toDateString() so they match reliably
+  const mandatoryHolidaySet = new Set(
+    mandatoryDates.map(d => (d instanceof Date ? d.toDateString() : String(d)))
   );
 
   let workingDays = 0;
   const cur = new Date(startDate);
 
-  console.log('[WorkingDays] Calculating working days from', startDate.toDateString(), 'to', endDate.toDateString());
+  console.log(
+    '[WorkingDays] Calculating working days from',
+    startDate.toDateString(),
+    'to',
+    endDate.toDateString()
+  );
+  console.log('[WorkingDays] Mandatory holiday set:', [...mandatoryHolidaySet]);
+
   while (cur <= endDate) {
-    const dayStr = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`;
-    const dayOfWeek = cur.getDay(); // 0 = Sunday, 6 = Saturday
+    const dayStr = cur.toDateString(); // ✅ same format as mandatoryDates entries
+    const dayOfWeek = cur.getDay();    // 0 = Sunday, 6 = Saturday
 
     if (dayOfWeek === 0 || dayOfWeek === 6) {
       console.log(`[WorkingDays] ${dayStr} is weekend, skipped`);
-    } else if (holidaySet.has(dayStr)) {
-      console.log(`[WorkingDays] ${dayStr} is holiday, skipped`);
+    } else if (mandatoryHolidaySet.has(dayStr)) {
+      console.log(`[WorkingDays] ${dayStr} is MANDATORY holiday, skipped`);
     } else {
       workingDays++;
-      console.log(`[WorkingDays] ${dayStr} counted as working day (total so far: ${workingDays})`);
+      console.log(
+        `[WorkingDays] ${dayStr} counted as working day (total so far: ${workingDays})`
+      );
     }
 
     cur.setDate(cur.getDate() + 1);

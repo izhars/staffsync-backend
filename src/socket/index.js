@@ -21,26 +21,26 @@ function initSocket(httpServer) {
   }
 
   console.log('🚀 Initializing Socket.IO server...');
-  
+
   io = new Server(httpServer, {
     cors: {
       origin: (origin, callback) => {
-        // Allow all origins during development, configure for production
+        // Allow all in development
+        if (process.env.NODE_ENV !== 'production') {
+          return callback(null, true);
+        }
         const allowedOrigins = [
-          process.env.CLIENT_URL || 'http://localhost:3000',
+          process.env.CLIENT_URL,
+          'http://localhost:3000',
           'http://localhost:3001',
           'http://127.0.0.1:3000',
           'http://127.0.0.1:3001',
-          'capacitor://localhost',
-          'ionic://localhost'
-        ];
-        
+        ].filter(Boolean);
         if (!origin || allowedOrigins.includes(origin)) {
-          callback(null, true);
-        } else {
-          console.log('❌ CORS blocked origin:', origin);
-          callback(new Error('Not allowed by CORS'));
+          return callback(null, true);
         }
+        console.log('❌ CORS blocked origin:', origin);
+        callback(new Error('Not allowed by CORS'));
       },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],

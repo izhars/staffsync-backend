@@ -9,25 +9,20 @@ exports.createLocation = async (req, res) => {
     const {
       name,
       type,
+      shape = 'circle',       // NEW
       address,
       latitude,
       longitude,
       radiusMeters,
+      polylinePoints,          // NEW
+      corridorWidthMeters,     // NEW
       allowedDepartments,
       allowedEmployees,
       remarks,
     } = req.body;
 
-    // Validate coordinates
-    if (latitude === undefined || longitude === undefined) {
-      return res.status(400).json({
-        success: false,
-        message: 'Latitude and longitude are required',
-      });
-    }
-
-    // Check duplicate name
-    const existing = await GeoFenceLocation.findOne({ name: name.trim() });
+    // Duplicate name
+    const existing = await GeoFenceLocation.findOne({ name: name?.trim() });
     if (existing) {
       return res.status(400).json({
         success: false,
@@ -35,18 +30,66 @@ exports.createLocation = async (req, res) => {
       });
     }
 
-    const location = await GeoFenceLocation.create({
+    // Shape-specific validation
+    if (shape === 'circle') {
+      if (latitude === undefined || longitude === undefined) {
+        return res.status(400).json({
+          success: false,
+          message: 'Latitude and longitude are required for circle geo-fence',
+        });
+      }
+    } else if (shape === 'polyline') {
+      if (!Array.isArray(polylinePoints) || polylinePoints.length < 2) {
+        return res.status(400).json({
+          success: false,
+          message: 'At least 2 polyline points are required for polyline geo-fence',
+        });
+      }
+      for (const pt of polylinePoints) {
+        if (
+          pt.latitude === undefined ||
+          pt.longitude === undefined ||
+          isNaN(parseFloat(pt.latitude)) ||
+          isNaN(parseFloat(pt.longitude))
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: 'Each polyline point must have valid latitude and longitude',
+          });
+        }
+      }
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'shape must be either "circle" or "polyline"',
+      });
+    }
+
+    const payload = {
       name,
-      type: type || 'site',
+      type: type || (shape === 'polyline' ? 'highway' : 'office'),
+      shape,
       address,
-      latitude: parseFloat(latitude),
-      longitude: parseFloat(longitude),
-      radiusMeters: radiusMeters || 100,
       allowedDepartments: allowedDepartments || [],
       allowedEmployees: allowedEmployees || [],
       remarks,
       createdBy: req.user.id,
-    });
+    };
+
+    if (shape === 'circle') {
+      payload.latitude = parseFloat(latitude);
+      payload.longitude = parseFloat(longitude);
+      payload.radiusMeters = radiusMeters || 100;
+    } else {
+      payload.polylinePoints = polylinePoints.map((p) => ({
+        latitude: parseFloat(p.latitude),
+        longitude: parseFloat(p.longitude),
+        label: p.label,
+      }));
+      payload.corridorWidthMeters = corridorWidthMeters || 100;
+    }
+
+    const location = await GeoFenceLocation.create(payload);
 
     res.status(201).json({
       success: true,
@@ -55,6 +98,48 @@ exports.createLocation = async (req, res) => {
     });
   } catch (error) {
     console.error('Create location error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.updateLocation = async (req, res) => {
+  try {
+    const location = await GeoFenceLocation.findById(req.params.id);
+    if (!location) {
+      return res.status(404).json({ success: false, message: 'Location not found' });
+    }
+
+    const fieldsToUpdate = [
+      'name', 'type', 'shape', 'address',
+      'latitude', 'longitude', 'radiusMeters',
+      'polylinePoints', 'corridorWidthMeters',
+      'allowedDepartments', 'allowedEmployees',
+      'remarks', 'isActive',
+    ];
+
+    fieldsToUpdate.forEach((field) => {
+      if (req.body[field] !== undefined) {
+        location[field] = req.body[field];
+      }
+    });
+
+    // Sanitize polyline points if provided
+    if (location.shape === 'polyline' && Array.isArray(location.polylinePoints)) {
+      location.polylinePoints = location.polylinePoints.map((p) => ({
+        latitude: parseFloat(p.latitude),
+        longitude: parseFloat(p.longitude),
+        label: p.label,
+      }));
+    }
+
+    await location.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Location updated successfully',
+      location,
+    });
+  } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -106,40 +191,6 @@ exports.getLocationById = async (req, res) => {
     }
 
     res.status(200).json({ success: true, location });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// @desc    Update location
-// @route   PUT /api/geo-fence/locations/:id
-// @access  Private (HR, superadmin)
-exports.updateLocation = async (req, res) => {
-  try {
-    const location = await GeoFenceLocation.findById(req.params.id);
-    if (!location) {
-      return res.status(404).json({ success: false, message: 'Location not found' });
-    }
-
-    const fieldsToUpdate = [
-      'name', 'type', 'address', 'latitude', 'longitude',
-      'radiusMeters', 'allowedDepartments', 'allowedEmployees',
-      'remarks', 'isActive',
-    ];
-
-    fieldsToUpdate.forEach((field) => {
-      if (req.body[field] !== undefined) {
-        location[field] = req.body[field];
-      }
-    });
-
-    await location.save();
-
-    res.status(200).json({
-      success: true,
-      message: 'Location updated successfully',
-      location,
-    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -199,17 +250,15 @@ exports.getMyLocations = async (req, res) => {
     const deptId = user?.department;
 
     const locations = await GeoFenceLocation.find({ isActive: true })
-      .select('name type address latitude longitude radiusMeters')
+      .select('name type shape address latitude longitude radiusMeters polylinePoints corridorWidthMeters')
       .lean();
 
     const available = locations.filter((loc) => {
       const noDept = !loc.allowedDepartments || loc.allowedDepartments.length === 0;
       const noEmp = !loc.allowedEmployees || loc.allowedEmployees.length === 0;
-
       if (noDept && noEmp) return true;
       if (loc.allowedEmployees?.some((id) => id.toString() === userId.toString())) return true;
       if (deptId && loc.allowedDepartments?.some((id) => id.toString() === deptId.toString())) return true;
-
       return false;
     });
 

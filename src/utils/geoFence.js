@@ -1,177 +1,171 @@
+// utils/geoFence.js
 const GeoFenceLocation = require('../models/GeoFenceLocation');
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Haversine Formula - distance between two coordinates in meters
-// ─────────────────────────────────────────────────────────────────────────────
-const calculateDistance = (lat1, lon1, lat2, lon2) => {
-  const R = 6371e3;
-  const φ1 = (lat1 * Math.PI) / 180;
-  const φ2 = (lat2 * Math.PI) / 180;
-  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
-  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+const EARTH_RADIUS_M = 6371000;
 
+/** Haversine distance in meters between two coords */
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
   const a =
-    Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(a));
+}
 
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-};
-
-const isValidCoordinates = (lat, lon) => {
-  return (
-    typeof lat === 'number' &&
-    typeof lon === 'number' &&
-    !isNaN(lat) &&
-    !isNaN(lon) &&
-    lat >= -90 && lat <= 90 &&
-    lon >= -180 && lon <= 180
-  );
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Emergency escape hatch (set in .env):
-//   ALLOW_CHECKIN_WITHOUT_GEOFENCE=true
-// Use ONLY for local dev / initial bootstrap. Never in production.
-// ─────────────────────────────────────────────────────────────────────────────
-const ALLOW_WITHOUT_GEOFENCE =
-  String(process.env.ALLOW_CHECKIN_WITHOUT_GEOFENCE).toLowerCase() === 'true';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Main check
-// ─────────────────────────────────────────────────────────────────────────────
-const isWithinAnyGeoFence = async (userLat, userLon, userId = null, userDepartmentId = null) => {
-  if (!isValidCoordinates(userLat, userLon)) {
-    return {
-      allowed: false,
-      reason: 'INVALID_COORDINATES',
-      message: 'Invalid coordinates provided',
-      matchedLocation: null,
-      nearestLocation: null,
-      distance: null,
-    };
+/**
+ * Distance (meters) from point P to the polyline defined by points[].
+ * For each segment, project P onto the segment (in a locally-flat
+ * approximation) and clamp to segment endpoints.
+ */
+function distanceToPolylineMeters(pLat, pLon, points) {
+  if (!points || points.length === 0) return Infinity;
+  if (points.length === 1) {
+    return haversineMeters(pLat, pLon, points[0].latitude, points[0].longitude);
   }
 
+  // Local equirectangular projection around P
+  const toRad = (d) => (d * Math.PI) / 180;
+  const cosLat = Math.cos(toRad(pLat));
+
+  const project = (lat, lon) => ({
+    x: toRad(lon - pLon) * cosLat * EARTH_RADIUS_M,
+    y: toRad(lat - pLat) * EARTH_RADIUS_M,
+  });
+
+  let minDist = Infinity;
+
+  for (let i = 0; i < points.length - 1; i++) {
+    const A = project(points[i].latitude, points[i].longitude);
+    const B = project(points[i + 1].latitude, points[i + 1].longitude);
+
+    const dx = B.x - A.x;
+    const dy = B.y - A.y;
+    const segLenSq = dx * dx + dy * dy;
+
+    let t = 0;
+    if (segLenSq > 0) {
+      // P is at origin (0,0) in this projection
+      t = -(A.x * dx + A.y * dy) / segLenSq;
+      t = Math.max(0, Math.min(1, t));
+    }
+
+    const closestX = A.x + t * dx;
+    const closestY = A.y + t * dy;
+    const dist = Math.sqrt(closestX * closestX + closestY * closestY);
+
+    if (dist < minDist) minDist = dist;
+  }
+
+  return minDist;
+}
+
+/**
+ * Main entry — checks a coordinate against all active geo-fences
+ * the user has access to. Returns:
+ *   { allowed, reason, matchedLocation, nearestLocation, allLocations, message }
+ */
+async function isWithinAnyGeoFence(latitude, longitude, userId, departmentId) {
   const locations = await GeoFenceLocation.find({ isActive: true }).lean();
 
-  // ── No active geo-fence configured ─────────────────────────────────────
-  if (!locations || locations.length === 0) {
-    if (ALLOW_WITHOUT_GEOFENCE) {
-      console.warn(
-        '[GEO-FENCE] ⚠️ No active locations. ALLOW_CHECKIN_WITHOUT_GEOFENCE=true → allowing.'
-      );
-      return {
-        allowed: true,
-        reason: 'NO_GEOFENCE_BOOTSTRAP_BYPASS',
-        message: 'No geo-fence configured (bootstrap bypass enabled)',
-        matchedLocation: null,
-        nearestLocation: null,
-        distance: null,
-      };
-    }
-
-    console.error('[GEO-FENCE] ❌ No active locations configured. Blocking check-in.');
-    return {
-      allowed: false,
-      reason: 'NO_GEOFENCE_CONFIGURED',
-      message: 'No geo-fence locations configured. Contact HR/Admin.',
-      matchedLocation: null,
-      nearestLocation: null,
-      distance: null,
-    };
-  }
-
-  // ── Filter locations this employee can access ──────────────────────────
-  const availableLocations = locations.filter((loc) => {
-    const noDeptRestriction = !loc.allowedDepartments || loc.allowedDepartments.length === 0;
-    const noEmpRestriction = !loc.allowedEmployees || loc.allowedEmployees.length === 0;
-    if (noDeptRestriction && noEmpRestriction) return true;
-
-    if (userId && loc.allowedEmployees?.some((id) => id.toString() === userId.toString())) {
+  // Filter by department/employee access
+  const accessible = locations.filter((loc) => {
+    const noDept = !loc.allowedDepartments || loc.allowedDepartments.length === 0;
+    const noEmp = !loc.allowedEmployees || loc.allowedEmployees.length === 0;
+    if (noDept && noEmp) return true;
+    if (loc.allowedEmployees?.some((id) => id.toString() === userId.toString())) return true;
+    if (departmentId && loc.allowedDepartments?.some((id) => id.toString() === departmentId.toString()))
       return true;
-    }
-    if (
-      userDepartmentId &&
-      loc.allowedDepartments?.some((id) => id.toString() === userDepartmentId.toString())
-    ) {
-      return true;
-    }
     return false;
   });
 
-  if (availableLocations.length === 0) {
+  if (accessible.length === 0) {
     return {
       allowed: false,
-      reason: 'NO_LOCATION_ASSIGNED',
-      message: 'No geo-fence location assigned to you. Contact HR/Admin.',
+      reason: 'NO_LOCATIONS_CONFIGURED',
+      message: 'No geo-fence locations configured for you. Contact HR.',
       matchedLocation: null,
       nearestLocation: null,
-      distance: null,
+      allLocations: [],
     };
   }
 
-  // ── Compute distances ──────────────────────────────────────────────────
-  const results = availableLocations.map((loc) => {
-    const distance = calculateDistance(userLat, userLon, loc.latitude, loc.longitude);
+  const evaluated = accessible.map((loc) => {
+    if (loc.shape === 'polyline') {
+      const dist = distanceToPolylineMeters(latitude, longitude, loc.polylinePoints);
+      const threshold = loc.corridorWidthMeters || 100;
+      return {
+        ...loc,
+        distance: Math.round(dist),
+        allowed: dist <= threshold,
+        threshold,
+        shape: 'polyline',
+      };
+    }
+    // circle
+    const dist = haversineMeters(latitude, longitude, loc.latitude, loc.longitude);
+    const threshold = loc.radiusMeters || 100;
     return {
-      location: loc,
-      distance: Math.round(distance),
-      withinRadius: distance <= loc.radiusMeters,
+      ...loc,
+      distance: Math.round(dist),
+      allowed: dist <= threshold,
+      threshold,
+      shape: 'circle',
     };
   });
 
-  const matched = results.filter((r) => r.withinRadius);
+  const matched = evaluated.find((l) => l.allowed);
 
-  if (matched.length > 0) {
-    matched.sort((a, b) => a.distance - b.distance);
-    const best = matched[0];
-
+  if (matched) {
     return {
       allowed: true,
       reason: 'WITHIN_FENCE',
-      message: `✅ You are at "${best.location.name}" (${best.distance}m from center)`,
       matchedLocation: {
-        id: best.location._id,
-        name: best.location.name,
-        type: best.location.type,
-        address: best.location.address,
-        distance: best.distance,
+        id: matched._id,
+        name: matched.name,
+        type: matched.type,
+        shape: matched.shape,
+        distance: matched.distance,
       },
-      allMatches: matched.map((m) => ({ name: m.location.name, distance: m.distance })),
       nearestLocation: null,
-      distance: best.distance,
+      allLocations: evaluated.map((l) => ({
+        id: l._id,
+        name: l.name,
+        shape: l.shape,
+        distance: l.distance,
+        allowed: l.allowed,
+      })),
+      message: `Within ${matched.name} (${matched.distance}m)`,
     };
   }
 
-  // ── No match — provide nearest for diagnostics ─────────────────────────
-  results.sort((a, b) => a.distance - b.distance);
-  const nearest = results[0];
-
+  // Not allowed — find nearest for the error message
+  const nearest = evaluated.reduce((a, b) => (a.distance < b.distance ? a : b));
   return {
     allowed: false,
-    reason: 'OUTSIDE_FENCE',
-    message: `❌ You are not within any allowed location.\nNearest: "${nearest.location.name}" is ${nearest.distance}m away (allowed: ${nearest.location.radiusMeters}m)`,
+    reason: 'OUTSIDE_ALL_FENCES',
+    message: `You are ${nearest.distance}m away from nearest location "${nearest.name}" (allowed: ${nearest.threshold}m)`,
     matchedLocation: null,
     nearestLocation: {
-      id: nearest.location._id,
-      name: nearest.location.name,
-      type: nearest.location.type,
-      address: nearest.location.address,
+      id: nearest._id,
+      name: nearest.name,
+      shape: nearest.shape,
       distance: nearest.distance,
-      allowedRadius: nearest.location.radiusMeters,
+      threshold: nearest.threshold,
     },
-    distance: nearest.distance,
-    allLocations: results.map((r) => ({
-      name: r.location.name,
-      distance: r.distance,
-      allowedRadius: r.location.radiusMeters,
-      withinRadius: r.withinRadius,
+    allLocations: evaluated.map((l) => ({
+      id: l._id,
+      name: l.name,
+      shape: l.shape,
+      distance: l.distance,
+      allowed: l.allowed,
     })),
   };
-};
+}
 
 module.exports = {
-  calculateDistance,
-  isValidCoordinates,
   isWithinAnyGeoFence,
+  haversineMeters,
+  distanceToPolylineMeters,
 };

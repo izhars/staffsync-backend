@@ -54,10 +54,12 @@ const debugRoutes = require('./routes/debugRoutes');
 const dailyTaskRoutes = require('./routes/dailyTaskRoutes');
 const callRoutes = require('./routes/callRoutes');
 const employeeInteractionRoutes = require('./routes/employeeInteractionRoutes');
-const face = require('./routes/faceRecognitionRoutes');
+// const face = require('./routes/faceRecognitionRoutes');
 const rfidRoutes = require('./routes/rfidRoutes'); // RFID routes
 const numberPlateRoutes = require('./routes/numberPlateRoutes');
 const geoFenceRoutes = require('./routes/geoFence');
+const geocodeRoutes = require("./routes/geocode");
+const faceRoutes = require('./routes/faceRoutes');
 
 // Initialize Express app
 const app = express();
@@ -81,6 +83,8 @@ const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:3002",
+  "http://localhost:5173", // Vite
+  "http://localhost:8080",
   process.env.CLIENT_URL
 ].filter(Boolean);
 
@@ -143,7 +147,7 @@ app.use('/api/feedbacks', feedbackRoutes);
 app.use('/api/polls', pollRoutes);
 app.use('/api/awards', awardRoutes);
 app.use('/api/badges', badgeRoutes);
-// app.use('/api/notifications', notificationRoutes);
+app.use('/api/notifications', notificationRoutes);
 app.use('/api/cron', cronTestRoutes);
 app.use('/api/combooff', comboOffRoutes);
 app.use('/api/faqs', faqRoutes);
@@ -163,10 +167,12 @@ app.use('/api/debug', debugRoutes);
 app.use('/api/daily-tasks', dailyTaskRoutes);
 app.use('/api/calls', callRoutes);  // Add call routes
 app.use('/api/employee-interactions', employeeInteractionRoutes);
-app.use('/api/face', face); // Face recognition routes
+// app.use('/api/face', face); // Face recognition routes
 app.use('/api/rfid-scans', rfidRoutes); // RFID scan routes
 app.use('/api/plate', numberPlateRoutes);
 app.use('/api/geo-fence', geoFenceRoutes);
+app.use("/api/geocode", geocodeRoutes); // Geocode routes
+app.use('/api/face', faceRoutes);
 
 // Add a debug endpoint
 app.get('/api/debug/socket-status', (req, res) => {

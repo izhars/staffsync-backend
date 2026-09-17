@@ -1,7 +1,6 @@
+// routes/auth.js
 const express = require('express');
 const router = express.Router();
-
-// ✅ Correctly destructure the upload middleware
 const { profileUpload } = require('../middleware/upload');
 
 const {
@@ -13,42 +12,36 @@ const {
   forgotPassword,
   resetPassword,
   getManagers,
+  assignManager,
   resetDevice,
   setVerification,
   checkVerification,
-  updateProfilePicture
+  updateProfilePicture,
 } = require('../controllers/authController');
 
 const { protect, hrAndAbove } = require('../middleware/auth');
 const { registerValidator, loginValidator } = require('../validators/authValidator');
 const { loginLimiter, registerLimiter } = require('../middleware/rateLimit');
 
-// -------------------------------
-// 🔐 Public Routes
-// -------------------------------
+// ── Public ──────────────────────────────────────────────────────
 router.post('/login', loginValidator, loginLimiter, login);
 router.post('/forgot-password', forgotPassword);
 router.put('/reset-password/:token', resetPassword);
 
-// -------------------------------
-// 👥 HR / Admin Restricted Routes
-// -------------------------------
+// ── Protected (HR Admin / Superadmin) ───────────────────────────
 router.post('/register', protect, hrAndAbove, registerValidator, registerLimiter, register);
 router.put('/reset-device/:userId', protect, hrAndAbove, resetDevice);
-router.put('/verify/:userId', protect, hrAndAbove, setVerification);
-router.get('/managers', protect, hrAndAbove, getManagers); // Fixed route name for clarity
+router.put('/verify/:userId',       protect, hrAndAbove, setVerification);
+router.get('/managers',             protect, hrAndAbove, getManagers);
+router.patch('/assign-manager/:userId', protect, hrAndAbove, assignManager);
 
-// -------------------------------
-// 🔒 Authenticated User Routes (protect applied below)
-// -------------------------------
-router.use(protect); // All routes below this require authentication
+// ── Authenticated user routes ───────────────────────────────────
+router.use(protect);
 
 router.get('/me', getMe);
 router.put('/profile', updateProfile);
 router.put('/change-password', changePassword);
 router.get('/check-verification', checkVerification);
-
-// ✅ Now this works correctly!
 router.put('/profile-picture', profileUpload.single('file'), updateProfilePicture);
 
 module.exports = router;

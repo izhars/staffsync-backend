@@ -1,142 +1,127 @@
 // src/seed/seedHr.js
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
 const path = require('path');
-
-// Load environment variables from root
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
 
-// Import models from src folder
 const User = require('../models/User');
 const Department = require('../models/Department');
+const { ACCESS_ROLES } = require('../constants/roles');
 
-// HR Data
-const hrData = {
-  employeeId: 'HR001',
-  firstName: 'HR',
-  lastName: 'Admin',
-  email: 'hr@staffsync.com',
-  password: 'Hr@123456',
-  role: 'hr',
-  department: 'Human Resources',
+// ────────────────────────────────────────────────────────────────
+// HR seed data
+// NOTE: 'hr_admin' is an ADMIN_ROLE, so the User model's pre-save
+// hook strips personal/salary/bank info and forces maritalStatus
+// to 'single' + clears marriageAnniversary. We still send the
+// minimum required by validation (designation, department, etc.).
+// ────────────────────────────────────────────────────────────────
+const HR_DATA = {
+  employeeId: 'SCAIPLH002',
+  firstName: 'Priya',
+  lastName: 'Singh',
+  email: 'priya.singh@staffsync.com',
+  password: 'Scaipl@123',
+  role: ACCESS_ROLES.HR_ADMIN,
   designation: 'HR Manager',
-  phone: '9876543210',
-  gender: 'female',
-  dateOfBirth: new Date('1990-01-15'),
   dateOfJoining: new Date('2020-01-01'),
-  maritalStatus: 'married',
-  bloodGroup: 'O+',
-  address: {
-    street: '123 HR Tower',
-    city: 'Mumbai',
-    state: 'Maharashtra',
-    country: 'India',
-    postalCode: '400001'
-  },
   isActive: true,
   isVerified: true,
-  employmentType: 'full-time',
-  leaveBalance: {
-    casual: 12,
-    sick: 10,
-    earned: 15,
-    combo: 0,
-    unpaid: 0
-  }
 };
 
-// Function to seed HR
+const HR_DEPT = {
+  name: 'HUMAN RESOURCES',
+  code: 'HR',
+};
+
 async function seedHR() {
   try {
     const mongoURI = process.env.MONGODB_URI;
+    if (!mongoURI) {
+      console.error('❌ MONGODB_URI is not defined in .env');
+      process.exit(1);
+    }
+
     console.log(`🔌 Connecting to MongoDB: ${mongoURI.replace(/\/\/.*@/, '//***@')}`);
-    
-    // Connect to MongoDB
-    await mongoose.connect(mongoURI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    });
+    await mongoose.connect(mongoURI);
     console.log('✅ Connected to MongoDB\n');
 
-    // Check if HR already exists
-    const existingHR = await User.findOne({ 
-      $or: [{ email: hrData.email }, { employeeId: hrData.employeeId }] 
-    });
+    // ── 1. Guard: does HR already exist? ─────────────────────────
+    const existing = await User.findOne({
+      $or: [{ email: HR_DATA.email }, { employeeId: HR_DATA.employeeId }],
+    }).populate('department', 'name code');
 
-    if (existingHR) {
-      console.log('⚠️ HR user already exists:');
-      console.log(`   📋 ID: ${existingHR.employeeId}`);
-      console.log(`   👤 Name: ${existingHR.firstName} ${existingHR.lastName}`);
-      console.log(`   📧 Email: ${existingHR.email}`);
-      console.log(`   🏢 Department: ${existingHR.department?.name || 'N/A'}`);
-      console.log('\n💡 To re-seed, delete this user first using resetSeeds.js');
+    if (existing) {
+      console.log('⚠️  HR user already exists:');
+      console.log(`   📋 Employee ID : ${existing.employeeId}`);
+      console.log(`   👤 Name        : ${existing.firstName} ${existing.lastName}`);
+      console.log(`   📧 Email       : ${existing.email}`);
+      console.log(`   🎭 Role        : ${existing.role}`);
+      console.log(`   🏢 Department  : ${existing.department?.name || 'N/A'}`);
+      console.log('\n💡 To re-seed, delete this user first (see resetSeeds.js).');
+      await mongoose.disconnect();
       process.exit(0);
     }
 
-    // Get or create HR Department
-    let department = await Department.findOne({ 
-      name: { $regex: new RegExp(`^${hrData.department.trim()}$`, 'i') } 
+    // ── 2. Ensure Department exists ──────────────────────────────
+    let dept = await Department.findOne({
+      name: { $regex: new RegExp(`^${HR_DEPT.name}$`, 'i') },
     });
 
-    if (!department) {
-      const code = hrData.department
-        .split(' ')
-        .map(word => word[0])
-        .join('')
-        .toUpperCase()
-        .substring(0, 4);
-
-      department = await Department.create({
-        name: hrData.department.trim(),
-        code: code,
-        isActive: true
+    if (!dept) {
+      console.log(`🏢 Creating department: ${HR_DEPT.name}`);
+      dept = await Department.create({
+        name: HR_DEPT.name,
+        code: HR_DEPT.code,
+        description: 'Human Resources department',
       });
-      console.log(`✅ Department created: ${department.name} (${department.code})`);
     } else {
-      console.log(`✅ Department found: ${department.name} (${department.code})`);
+      console.log(`🏢 Using existing department: ${dept.name} (${dept.code})`);
     }
 
-    // Set department ID
-    hrData.department = department._id;
+    // ── 3. Create the hr_admin user ──────────────────────────────
+    // Password hashing handled by User pre-save hook #1.
+    const hrUser = await User.create({
+      ...HR_DATA,
+      department: dept._id,
+    });
 
-    // Hash password
-    const salt = await bcrypt.genSalt(12);
-    hrData.password = await bcrypt.hash(hrData.password, salt);
-
-    // Create HR user
-    const hrUser = new User(hrData);
-    await hrUser.save();
-
-    // Update department head
-    if (!department.head) {
-      department.head = hrUser._id;
-      await department.save();
+    // ── 4. Set department head (if unset) ────────────────────────
+    if (!dept.head) {
+      dept.head = hrUser._id;
+      await dept.save();
+      console.log(`👔 Set ${hrUser.employeeId} as head of ${dept.name}`);
     }
 
+    // ── 5. Report ────────────────────────────────────────────────
     console.log('\n✅ HR user created successfully!');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log(`📋 Employee ID: ${hrUser.employeeId}`);
-    console.log(`👤 Name: ${hrUser.firstName} ${hrUser.lastName}`);
-    console.log(`📧 Email: ${hrUser.email}`);
-    console.log(`🔑 Password: Hr@123456`);
-    console.log(`🏢 Department: ${hrData.department}`);
-    console.log(`💼 Role: ${hrUser.role}`);
-    console.log(`🆔 User ID: ${hrUser._id}`);
+    console.log(`📋 Employee ID : ${hrUser.employeeId}`);
+    console.log(`👤 Name        : ${hrUser.firstName} ${hrUser.lastName}`);
+    console.log(`📧 Email       : ${hrUser.email}`);
+    console.log(`🔑 Password    : ${HR_DATA.password}`);
+    console.log(`🎭 Role        : ${hrUser.role}`);
+    console.log(`🏢 Department  : ${dept.name}`);
+    console.log(`💼 Designation : ${hrUser.designation}`);
+    console.log(`🆔 User ID     : ${hrUser._id}`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🎉 HR seeding completed successfully!');
 
+    await mongoose.disconnect();
     process.exit(0);
-
   } catch (error) {
     console.error('❌ Error seeding HR:', error.message);
     if (error.code === 11000) {
-      console.error('⚠️ Duplicate key error - user may already exist');
-      console.error('   Try running: node src/seed/resetSeeds.js');
+      console.error('⚠️  Duplicate key error — user may already exist.');
     }
-    console.error('   Stack:', error.stack);
+    if (error.name === 'ValidationError') {
+      console.error('   Validation details:');
+      Object.values(error.errors).forEach((e) =>
+        console.error(`     - ${e.path}: ${e.message}`)
+      );
+    }
+    console.error(error.stack);
+    await mongoose.disconnect().catch(() => {});
     process.exit(1);
   }
 }
 
-// Run the seed
 seedHR();

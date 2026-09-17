@@ -8,14 +8,14 @@ const { badgeUpload } = require('../middleware/upload');
 const {
   createBadge,
   getBadges,
-  deleteBadge
+  deleteBadge,
 } = require('../controllers/badgeController');
 
-const { protect, authorize } = require('../middleware/auth');
+const { protect, hrAdminAndAbove } = require('../middleware/auth');
 
-// 🔒 Protected Routes
+// 🔒 All routes require auth + HR admin or above
 router.use(protect);
-router.use(authorize('hr', 'superadmin'));
+router.use(hrAdminAndAbove);
 
 // Create a new badge (with image upload)
 router.post('/', badgeUpload.single('image'), createBadge);

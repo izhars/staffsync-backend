@@ -2,10 +2,34 @@
 const express = require('express');
 const router = express.Router();
 
-const { createProject, getAllProjects, getProject, updateProject, deleteProject, addExpense, getExpenseHistory, isUserInProject,getMyExpenseHistory } = require('../controllers/projectController');
-const { addTeamMember, updateTeamMember, removeTeamMember, getTeamMembers } = require('../controllers/teamController');
-const { addResponsibility, getProjectResponsibilities } = require('../controllers/roleController');
+const {
+  createProject,
+  getAllProjects,
+  getProject,
+  updateProject,
+  deleteProject,
+  addExpense,
+  getExpenseHistory,
+  isUserInProject,
+  getMyExpenseHistory,
+} = require('../controllers/projectController');
+
+const {
+  addTeamMember,
+  updateTeamMember,
+  removeTeamMember,
+  getTeamMembers,
+} = require('../controllers/teamController');
+
+const {
+  addResponsibility,
+  getProjectResponsibilities,
+} = require('../controllers/roleController');
+
 const { protect, managerAndAbove } = require('../middleware/auth');
+
+// Apply auth to all routes
+router.use(protect);
 
 /* =========================
    📦 Project Routes
@@ -13,53 +37,50 @@ const { protect, managerAndAbove } = require('../middleware/auth');
 
 // 👀 Read → anyone logged in
 router.route('/')
-  .get(protect, getAllProjects)
-  .post(protect, managerAndAbove, createProject);
+  .get(getAllProjects)
+  .post(managerAndAbove, createProject);
 
 router.route('/:id')
-  .get(protect, getProject)
-  .put(protect, managerAndAbove, updateProject)
-  .delete(protect, managerAndAbove, deleteProject);
+  .get(getProject)
+  .put(managerAndAbove, updateProject)
+  .delete(managerAndAbove, deleteProject);
 
 /* =========================
    👥 Team Members
 ========================= */
 
 router.route('/:projectId/team-members')
-  .get(protect, getTeamMembers)
-  .post(protect, managerAndAbove, addTeamMember);
+  .get(getTeamMembers)
+  .post(managerAndAbove, addTeamMember);
 
 router.route('/:projectId/team-members/:memberId')
-  .put(protect, managerAndAbove, updateTeamMember)
-  .delete(protect, managerAndAbove, removeTeamMember);
+  .put(managerAndAbove, updateTeamMember)
+  .delete(managerAndAbove, removeTeamMember);
 
 /* =========================
    🎯 Responsibilities
 ========================= */
 
 router.route('/:projectId/responsibilities')
-  .get(protect, getProjectResponsibilities)
-  .post(protect, managerAndAbove, addResponsibility);
+  .get(getProjectResponsibilities)
+  .post(managerAndAbove, addResponsibility);
 
 /* =========================
- 💸 Expenses / Spending
+   💸 Expenses / Spending
 ========================= */
 
-router.route('/:id/expenses')
-  .post(protect, addExpense)     // Record a new spend
-  .get(protect, getExpenseHistory);              // View full history
+// ⚠️ Static sub-path MUST come before the parameterized one
+router.get('/:id/expenses/me', getMyExpenseHistory);
 
-router.get(
-  '/:id/expenses/me',
-  protect,
-  getMyExpenseHistory
-);
+router.route('/:id/expenses')
+  .post(addExpense)
+  .get(getExpenseHistory);
 
 /* =========================
    ✅ Check if user is member of project
 ========================= */
 
 router.route('/:projectId/is-member')
-  .get(protect, isUserInProject);
+  .get(isUserInProject);
 
 module.exports = router;

@@ -1,28 +1,33 @@
 // routes/pollRoutes.js
 const router = require('express').Router();
-const { protect, authorize } = require('../middleware/auth');
-const { 
-  create, 
-  list, 
-  vote, 
-  results, 
-  edit, 
-  close, 
-  remove 
+const { protect, hrAdminAndAbove } = require('../middleware/auth');
+
+const {
+  create,
+  list,
+  vote,
+  results,
+  edit,
+  close,
+  remove,
 } = require('../controllers/pollController');
 
 // Apply authentication to all routes
 router.use(protect);
 
-// Public routes (all authenticated users)
-router.get('/', list);                    // GET /polls - List all polls
-router.post('/:id/vote', vote);           // POST /polls/:id/vote - Vote on poll
-router.get('/:id', results);              // GET /polls/:id - Get poll results
+// ─────────────────────────────────────────────
+// Static routes (any authenticated user)
+// ─────────────────────────────────────────────
+router.get('/', list);        // GET  /polls          - List all polls
+router.post('/', hrAdminAndAbove, create);  // POST /polls - Create poll
 
-// HR/Admin only routes
-router.post('/', authorize('hr', 'admin'), create);        // POST /polls - Create poll
-router.patch('/:id', authorize('hr', 'admin'), edit);      // PATCH /polls/:id - Edit poll
-router.post('/:id/close', authorize('hr', 'admin'), close); // POST /polls/:id/close - Close poll
-router.delete('/:id', authorize('hr', 'admin'), remove);    // DELETE /polls/:id - Delete poll
+// ─────────────────────────────────────────────
+// Parameterized routes
+// ─────────────────────────────────────────────
+router.post('/:id/vote', vote);             // POST   /polls/:id/vote  - Vote
+router.post('/:id/close', hrAdminAndAbove, close);   // POST   /polls/:id/close - Close
+router.patch('/:id', hrAdminAndAbove, edit);         // PATCH  /polls/:id       - Edit
+router.delete('/:id', hrAdminAndAbove, remove);      // DELETE /polls/:id       - Delete
+router.get('/:id', results);                // GET    /polls/:id       - Results
 
 module.exports = router;

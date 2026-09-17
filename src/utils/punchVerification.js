@@ -123,13 +123,17 @@ function isOfficeNetwork(req) {
  *   networkMatch?: string|null
  * }}
  */
-function evaluatePunchVerification({ req, user, hasCoords }) {
+function evaluatePunchVerification({ req, user, hasCoords, isDesktop }) {
   const role = user?.role;
   const isPrivileged = PRIVILEGED_ROLES.includes(role);
   const { isOffice, ip, configured, matchedBy } = isOfficeNetwork(req);
-  const punchedFrom = hasCoords ? 'mobile' : 'desktop';
 
-  // ── 1. Has GPS → normal path (geo-fence still runs in controller)
+  // Prefer an explicit hint from the client; fall back to GPS presence.
+  // Client should send `punchedFrom` (or we detect via user-agent).
+  const punchedFrom =
+    isDesktop ?? (hasCoords ? 'mobile' : 'desktop');
+
+  // ── 1. Mobile / GPS present → normal path (geo-fence still runs)
   if (hasCoords) {
     return {
       allowed: true,
@@ -141,8 +145,32 @@ function evaluatePunchVerification({ req, user, hasCoords }) {
     };
   }
 
-  // ── 2. No GPS + not privileged → hard reject
-  if (!isPrivileged) {
+  // ── 2. No GPS + on office network → allow (any role)
+  if (isOffice && configured) {
+    return {
+      allowed: true,
+      method: 'OFFICE_NETWORK',
+      bypass: true,
+      reason: `Desktop punch verified via office network (${matchedBy})`,
+      clientIp: ip,
+      punchedFrom,
+      networkMatch: matchedBy,
+    };
+  }
+
+  // ── 3. No GPS + whitelist not configured (dev/staging) → allow privileged only
+  if (isOffice && !configured) {
+    if (isPrivileged) {
+      return {
+        allowed: true,
+        method: 'BYPASS_NO_GPS_PRIVILEGED',
+        bypass: true,
+        reason: 'HR/Admin desktop punch — office IP whitelist not configured',
+        clientIp: ip,
+        punchedFrom,
+        networkMatch: matchedBy,
+      };
+    }
     return {
       allowed: false,
       method: 'GPS',
@@ -154,38 +182,23 @@ function evaluatePunchVerification({ req, user, hasCoords }) {
     };
   }
 
-  // ── 3. No GPS + HR/Admin + on office network (whitelist configured)
-  if (isOffice && configured) {
+  // ── 4. No GPS + not on office network
+  if (isPrivileged) {
     return {
-      allowed: true,
+      allowed: false,
       method: 'OFFICE_NETWORK',
-      bypass: true,
-      reason: `HR/Admin desktop punch verified via office network (${matchedBy})`,
+      bypass: false,
+      reason: 'NOT_ON_OFFICE_NETWORK',
       clientIp: ip,
       punchedFrom,
       networkMatch: matchedBy,
     };
   }
-
-  // ── 4. No GPS + HR/Admin + whitelist NOT configured (dev/staging)
-  if (isOffice && !configured) {
-    return {
-      allowed: true,
-      method: 'BYPASS_NO_GPS_PRIVILEGED',
-      bypass: true,
-      reason: 'HR/Admin desktop punch — office IP whitelist not configured',
-      clientIp: ip,
-      punchedFrom,
-      networkMatch: matchedBy,
-    };
-  }
-
-  // ── 5. No GPS + HR/Admin + wrong network → reject
   return {
     allowed: false,
-    method: 'OFFICE_NETWORK',
+    method: 'GPS',
     bypass: false,
-    reason: 'NOT_ON_OFFICE_NETWORK',
+    reason: 'NO_LOCATION',
     clientIp: ip,
     punchedFrom,
     networkMatch: matchedBy,

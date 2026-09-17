@@ -1,6 +1,8 @@
+// routes/payrollRoutes.js
 const express = require('express');
 const router = express.Router();
-const { protect, authorize } = require('../middleware/auth');
+
+const { protect, hrAdminAndAbove } = require('../middleware/auth');
 
 const {
   generatePayroll,
@@ -8,33 +10,24 @@ const {
   getMyPayroll,
   updatePayroll,
   processPayroll,
-  markAsPaid
+  markAsPaid,
 } = require('../controllers/payrollController');
 
-router.use(protect); // All routes below require login
+// All routes below require login
+router.use(protect);
 
-router
-  .route('/generate')
-  .post(authorize('hr', 'superadmin'), generatePayroll);
+// ─────────────────────────────────────────────
+// Static routes (must come BEFORE /:id)
+// ─────────────────────────────────────────────
+router.post('/generate', hrAdminAndAbove, generatePayroll);
+router.get('/', hrAdminAndAbove, getAllPayrolls);
+router.get('/my-payroll', getMyPayroll);
 
-router
-  .route('/')
-  .get(authorize('hr', 'superadmin'), getAllPayrolls);
-
-router
-  .route('/my-payroll')
-  .get(getMyPayroll);
-
-router
-  .route('/:id')
-  .put(authorize('hr', 'superadmin'), updatePayroll);
-
-router
-  .route('/:id/process')
-  .put(authorize('hr', 'superadmin'), processPayroll);
-
-router
-  .route('/:id/pay')
-  .put(authorize('hr', 'superadmin'), markAsPaid);
+// ─────────────────────────────────────────────
+// Parameterized routes
+// ─────────────────────────────────────────────
+router.put('/:id', hrAdminAndAbove, updatePayroll);
+router.put('/:id/process', hrAdminAndAbove, processPayroll);
+router.put('/:id/pay', hrAdminAndAbove, markAsPaid);
 
 module.exports = router;

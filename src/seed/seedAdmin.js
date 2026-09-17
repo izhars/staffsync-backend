@@ -1,127 +1,118 @@
 // src/seed/seedAdmin.js
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
-const User = require('../models/User');
 
-// Admin Data
-const adminData = {
-  employeeId: 'ADMIN001',
+const User = require('../models/User');
+const Department = require('../models/Department');
+const { ACCESS_ROLES } = require('../constants/roles');
+
+// ────────────────────────────────────────────────────────────────
+// Admin seed data
+// NOTE: For ADMIN_ROLES (superadmin / hr_admin) the User model's
+// pre-save hook strips personal / salary / bank info, so we don't
+// bother including it here.
+// ────────────────────────────────────────────────────────────────
+const ADMIN_DATA = {
+  employeeId: 'SCAIPLH001',
   firstName: 'System',
   lastName: 'Administrator',
   email: 'admin@staffsync.com',
   password: 'Admin@123456',
-  role: 'admin',
-  department: 'Administration',
+  role: ACCESS_ROLES.SUPER_ADMIN,   // 'superadmin'
   designation: 'System Administrator',
-  phone: '9876543210',
-  gender: 'male',
-  dateOfBirth: new Date('1990-01-01'),
   dateOfJoining: new Date('2023-01-01'),
-  maritalStatus: 'single',
-  bloodGroup: 'A+',
-  address: {
-    street: '123 Admin Tower',
-    city: 'Mumbai',
-    state: 'Maharashtra',
-    country: 'India',
-    postalCode: '400001'
-  },
-  salary: {
-    basic: 80000,
-    hra: 30000,
-    transport: 10000,
-    allowances: 15000,
-    deductions: 10000,
-    netSalary: 0
-  },
-  bankDetails: {
-    accountNumber: '9876543210',
-    bankName: 'SBI Bank',
-    ifscCode: 'SBIN0001234',
-    accountHolderName: 'System Administrator'
-  },
-  panNumber: 'FGHIJ5678K',
-  pfNumber: 'MH987654321',
-  uanNumber: '987654321098',
-  employmentType: 'full-time',
-  weekendType: 'sunday',
   isActive: true,
   isVerified: true,
-  leaveBalance: {
-    casual: 12,
-    sick: 10,
-    earned: 15,
-    combo: 0,
-    unpaid: 0
-  }
 };
 
-// Function to seed Admin
+const ADMIN_DEPT = {
+  name: 'ADMINISTRATION',
+  code: 'ADMIN',
+};
+
 async function seedAdmin() {
   try {
     const mongoURI = process.env.MONGODB_URI;
+    if (!mongoURI) {
+      console.error('❌ MONGODB_URI is not defined in .env');
+      process.exit(1);
+    }
+
     console.log(`🔌 Connecting to MongoDB: ${mongoURI.replace(/\/\/.*@/, '//***@')}`);
-    
-    // Connect to MongoDB
-    await mongoose.connect(mongoURI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    });
+    await mongoose.connect(mongoURI);
     console.log('✅ Connected to MongoDB\n');
 
-    // Check if Admin already exists
-    const existingAdmin = await User.findOne({ 
-      $or: [{ email: adminData.email }, { employeeId: adminData.employeeId }] 
-    });
+    // ── 1. Guard: does admin already exist? ──────────────────────
+    const existing = await User.findOne({
+      $or: [{ email: ADMIN_DATA.email }, { employeeId: ADMIN_DATA.employeeId }],
+    }).populate('department', 'name code');
 
-    if (existingAdmin) {
-      console.log('⚠️ Admin user already exists:');
-      console.log(`   📋 ID: ${existingAdmin.employeeId}`);
-      console.log(`   👤 Name: ${existingAdmin.firstName} ${existingAdmin.lastName}`);
-      console.log(`   📧 Email: ${existingAdmin.email}`);
-      console.log(`   🏢 Department: ${existingAdmin.department?.name || 'N/A'}`);
-      console.log('\n💡 To re-seed, delete this user first using resetSeeds.js');
+    if (existing) {
+      console.log('⚠️  Admin user already exists:');
+      console.log(`   📋 Employee ID : ${existing.employeeId}`);
+      console.log(`   👤 Name        : ${existing.firstName} ${existing.lastName}`);
+      console.log(`   📧 Email       : ${existing.email}`);
+      console.log(`   🎭 Role        : ${existing.role}`);
+      console.log(`   🏢 Department  : ${existing.department?.name || 'N/A'}`);
+      console.log('\n💡 To re-seed, delete this user first (see resetSeeds.js).');
+      await mongoose.disconnect();
       process.exit(0);
     }
 
-    // Calculate net salary
-    const { basic, hra, transport, allowances, deductions } = adminData.salary;
-    adminData.salary.netSalary = Math.max(0, (basic + hra + transport + allowances) - deductions);
+    // ── 2. Ensure Department exists (schema requires an ObjectId) ─
+    let dept = await Department.findOne({ name: ADMIN_DEPT.name });
+    if (!dept) {
+      console.log(`🏢 Creating department: ${ADMIN_DEPT.name}`);
+      dept = await Department.create({
+        name: ADMIN_DEPT.name,
+        code: ADMIN_DEPT.code,
+        description: 'System administration department',
+      });
+    } else {
+      console.log(`🏢 Using existing department: ${dept.name} (${dept.code})`);
+    }
 
-    // Hash password
-    const salt = await bcrypt.genSalt(12);
-    adminData.password = await bcrypt.hash(adminData.password, salt);
+    // ── 3. Create the superadmin user ────────────────────────────
+    // NOTE: password is hashed automatically by the User pre-save hook,
+    //       so we pass the plain-text value.
+    const adminUser = await User.create({
+      ...ADMIN_DATA,
+      department: dept._id,
+      createdBy: null,           // seed has no creator
+    });
 
-    // Create Admin user
-    const adminUser = new User(adminData);
-    await adminUser.save();
-
+    // ── 4. Report ────────────────────────────────────────────────
     console.log('\n✅ Admin user created successfully!');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log(`📋 Employee ID: ${adminUser.employeeId}`);
-    console.log(`👤 Name: ${adminUser.firstName} ${adminUser.lastName}`);
-    console.log(`📧 Email: ${adminUser.email}`);
-    console.log(`🔑 Password: Admin@123456`);
-    console.log(`💼 Role: ${adminUser.role}`);
-    console.log(`💰 Net Salary: ₹${adminUser.salary.netSalary}`);
-    console.log(`🆔 User ID: ${adminUser._id}`);
+    console.log(`📋 Employee ID : ${adminUser.employeeId}`);
+    console.log(`👤 Name        : ${adminUser.firstName} ${adminUser.lastName}`);
+    console.log(`📧 Email       : ${adminUser.email}`);
+    console.log(`🔑 Password    : ${ADMIN_DATA.password}`);
+    console.log(`🎭 Role        : ${adminUser.role}`);
+    console.log(`🏢 Department  : ${dept.name}`);
+    console.log(`💼 Designation : ${adminUser.designation}`);
+    console.log(`🆔 User ID     : ${adminUser._id}`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🎉 Admin seeding completed successfully!');
 
+    await mongoose.disconnect();
     process.exit(0);
-
   } catch (error) {
     console.error('❌ Error seeding Admin:', error.message);
     if (error.code === 11000) {
-      console.error('⚠️ Duplicate key error - user may already exist');
-      console.error('   Try running: node src/seed/resetSeeds.js');
+      console.error('⚠️  Duplicate key error — user may already exist.');
     }
-    console.error('   Stack:', error.stack);
+    if (error.name === 'ValidationError') {
+      console.error('   Validation details:');
+      Object.values(error.errors).forEach((e) =>
+        console.error(`     - ${e.path}: ${e.message}`)
+      );
+    }
+    console.error(error.stack);
+    await mongoose.disconnect().catch(() => {});
     process.exit(1);
   }
 }
 
-// Run the seed
 seedAdmin();

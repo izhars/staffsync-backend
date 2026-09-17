@@ -1,12 +1,20 @@
+// routes/attendanceRoutes.js
 const express = require('express');
 const router = express.Router();
-const { protect, authorize } = require('../middleware/auth');
+
+const {
+  protect,
+  managerAndAbove,   // super_admin + hr_admin + manager
+  hrAdminAndAbove,   // super_admin + hr_admin
+} = require('../middleware/auth');
+
 const {
   checkIn,
   checkOut,
   getMyAttendance,
   getTodayAttendance,
   getEmployeeAttendance,
+  getEmployeeAttendancWithCalender,
   getAttendanceReport,
   updateAttendance,
   markStatus,
@@ -15,17 +23,19 @@ const {
   cancelAction,
   getAttendanceStatus,
   exportAttendance,
-  getTodayAllEmployeesAttendance, // New API
+  getTodayAllEmployeesAttendance,
   getAllEmployeesAttendance,
   getEmployeeWorkHoursChart,
   getWorkHoursChartMonthly,
-  exportMonthlyAttendanceExcel
+  exportMonthlyAttendanceExcel,
 } = require('../controllers/attendanceController');
 
 // Protect all routes
 router.use(protect);
 
-// Employee routes
+// ─────────────────────────────────────────────
+// Employee self-service (any authenticated user)
+// ─────────────────────────────────────────────
 router.post('/check-in', checkIn);
 router.post('/check-out', checkOut);
 router.get('/my-attendance', getMyAttendance);
@@ -34,20 +44,30 @@ router.get('/status', getAttendanceStatus);
 router.get('/work-hours-chart', getEmployeeWorkHoursChart);
 router.get('/work-hours-chart-monthly', getWorkHoursChartMonthly);
 
-// Manager/HR/Admin routes
-router.get('/employee/:employeeId', authorize('hr', 'manager', 'superadmin'), getEmployeeAttendance);
-router.get('/summary', authorize('hr', 'manager', 'superadmin'), getAttendanceSummary);
-router.get('/today-all', authorize('hr', 'superadmin'), getTodayAllEmployeesAttendance); // New route
-router.get('/attendance-all', authorize('hr', 'superadmin'), getAllEmployeesAttendance); // New route
+// ─────────────────────────────────────────────
+// Manager / HR / Admin
+// ─────────────────────────────────────────────
+router.get('/employee/:employeeId', managerAndAbove, getEmployeeAttendance);
+router.get('/summary', managerAndAbove, getAttendanceSummary);
 
-// HR/Admin routes
-router.get('/report', authorize('hr', 'superadmin'), getAttendanceReport);
-router.put('/:attendanceId', authorize('hr', 'superadmin'), updateAttendance);
-router.post('/mark-status', authorize('hr', 'superadmin'), markStatus);
-router.post('/bulk-upload', authorize('hr', 'superadmin'), bulkUploadAttendance);
-router.delete('/:attendanceId/action', authorize('hr', 'superadmin'), cancelAction);
-router.get('/export', authorize('hr', 'superadmin'), exportAttendance);
-// Add this route (HR/Admin only)
-router.get('/export-monthly', authorize('hr', 'superadmin'), exportMonthlyAttendanceExcel);
+// ─────────────────────────────────────────────
+// HR / Admin only
+// ─────────────────────────────────────────────
+router.get('/today-all', hrAdminAndAbove, getTodayAllEmployeesAttendance);
+router.get('/attendance-all', hrAdminAndAbove, getAllEmployeesAttendance);
+router.get('/report', hrAdminAndAbove, getAttendanceReport);
+router.get(
+  '/employee-attendance/:employeeId',
+  hrAdminAndAbove,
+  getEmployeeAttendancWithCalender
+);
+router.post('/mark-status', hrAdminAndAbove, markStatus);
+router.post('/bulk-upload', hrAdminAndAbove, bulkUploadAttendance);
+router.get('/export', hrAdminAndAbove, exportAttendance);
+router.get('/export-monthly', hrAdminAndAbove, exportMonthlyAttendanceExcel);
+
+// Parameterized routes — keep LAST so they don't shadow static paths
+router.put('/:attendanceId', hrAdminAndAbove, updateAttendance);
+router.delete('/:attendanceId/action', hrAdminAndAbove, cancelAction);
 
 module.exports = router;

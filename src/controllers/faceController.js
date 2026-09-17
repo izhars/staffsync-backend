@@ -25,23 +25,6 @@ exports.registerFace = async (req, res) => {
             enrolledFrom = 'mobile',
         } = req.body;
 
-        console.log(`\n========== FACE ENROLLMENT [${requestId}] ==========`);
-        console.log(`${logPrefix} ▶️ Request received`);
-        console.log(`${logPrefix} 👤 User:`, {
-            userId: req.user?.id,
-            role: req.user?.role,
-            email: req.user?.email,
-        });
-        console.log(`${logPrefix} 📦 Payload summary:`, {
-            embeddingLength: Array.isArray(embedding) ? embedding.length : `not-array(${typeof embedding})`,
-            model,
-            livenessPassed,
-            enrolledFrom,
-            hasReferenceImageUrl: !!referenceImageUrl,
-        });
-
-        // ── Validation ────────────────────────────────────────────────
-        console.log(`${logPrefix} 🔍 Validating embedding array...`);
         if (!Array.isArray(embedding) || embedding.length < 128) {
             console.warn(`${logPrefix} ❌ INVALID_EMBEDDING`, {
                 isArray: Array.isArray(embedding),
@@ -53,9 +36,6 @@ exports.registerFace = async (req, res) => {
                 message: 'Invalid embedding. Must be an array of at least 128 floats.',
             });
         }
-        console.log(`${logPrefix} ✅ Embedding array valid (length=${embedding.length})`);
-
-        console.log(`${logPrefix} 🔍 Checking embedding values are finite numbers...`);
         const hasInvalidValues = embedding.some(
             (v) => typeof v !== 'number' || !Number.isFinite(v)
         );
@@ -73,9 +53,7 @@ exports.registerFace = async (req, res) => {
                 message: 'All embedding values must be finite numbers.',
             });
         }
-        console.log(`${logPrefix} ✅ All embedding values are finite numbers`);
 
-        console.log(`${logPrefix} 🔍 Checking livenessPassed...`);
         if (!livenessPassed) {
             console.warn(`${logPrefix} ❌ LIVENESS_FAILED`, { livenessPassed });
             return res.status(400).json({
@@ -84,24 +62,9 @@ exports.registerFace = async (req, res) => {
                 message: 'Liveness check failed. A live face is required.',
             });
         }
-        console.log(`${logPrefix} ✅ Liveness passed`);
 
-        console.log(`${logPrefix} ✅ All validation passed`);
-
-        // ── Duplicate / authorization check ──────────────────────────
-        console.log(`${logPrefix} 🔍 Looking up existing enrollment for userId=${req.user.id}...`);
         const existing = await FaceEmbedding.findOne({ employee: req.user.id });
         const isPrivileged = RE_ENROLL_ROLES.includes(req.user.role);
-
-        console.log(`${logPrefix} 📋 Existing record:`, existing
-            ? {
-                id: existing._id,
-                isActive: existing.isActive,
-                model: existing.model,
-                enrolledAt: existing.enrolledAt,
-            }
-            : 'none');
-        console.log(`${logPrefix} 🔐 isPrivileged=${isPrivileged} (role=${req.user.role})`);
 
         if (existing && existing.isActive && !isPrivileged) {
             console.warn(`${logPrefix} ❌ Duplicate blocked — ALREADY_ENROLLED`, {
@@ -120,20 +83,7 @@ exports.registerFace = async (req, res) => {
             });
         }
 
-        if (existing && existing.isActive && isPrivileged) {
-            console.log(`${logPrefix} ♻️ Privileged re-enrollment allowed`, {
-                role: req.user.role,
-            });
-        } else {
-            console.log(`${logPrefix} 🆕 New enrollment (no active existing record)`);
-        }
-
-        // ── Normalize & save ─────────────────────────────────────────
-        console.log(`${logPrefix} 🔄 Normalizing embedding...`);
         const normalized = l2Normalize(embedding);
-        console.log(`${logPrefix} ✅ Normalized embedding (length=${normalized.length})`);
-
-        console.log(`${logPrefix} 💾 Saving enrollment record (upsert)...`);
         const record = await FaceEmbedding.findOneAndUpdate(
             { employee: req.user.id },
             {
@@ -149,13 +99,6 @@ exports.registerFace = async (req, res) => {
             },
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
-
-        console.log(`${logPrefix} ✅ Saved successfully`, {
-            recordId: record._id,
-            model: record.model,
-            enrolledAt: record.enrolledAt,
-            embeddingSize: record.embedding.length,
-        });
 
         return res.status(200).json({
             success: true,
@@ -186,21 +129,11 @@ exports.registerFace = async (req, res) => {
 exports.getFaceStatus = async (req, res) => {
     const logPrefix = `[getFaceStatus][user=${req.user?.id}]`;
     try {
-        console.log(`${logPrefix} ▶️ Request received`);
 
-        console.log(`${logPrefix} 🔍 Querying active FaceEmbedding...`);
         const record = await FaceEmbedding.findOne({
             employee: req.user.id,
             isActive: true,
         }).select('model enrolledAt livenessPassed embeddingSize');
-
-        console.log(`${logPrefix} 📋 Query result:`, record
-            ? {
-                model: record.model,
-                enrolledAt: record.enrolledAt,
-                livenessPassed: record.livenessPassed,
-            }
-            : 'no active enrollment');
 
         return res.json({
             success: true,
@@ -232,20 +165,6 @@ exports.verifyFace = async (req, res) => {
     try {
         const { embedding, action = 'check-in' } = req.body;
 
-        console.log(`\n========== FACE VERIFY [${requestId}] ==========`);
-        console.log(`${logPrefix} ▶️ Request received`);
-        console.log(`${logPrefix} 👤 User:`, {
-            userId: req.user?.id,
-            role: req.user?.role,
-            email: req.user?.email,
-        });
-        console.log(`${logPrefix} 📦 Payload:`, {
-            embeddingLength: Array.isArray(embedding) ? embedding.length : `not-array(${typeof embedding})`,
-            action,
-        });
-
-        // ── Validate embedding ───────────────────────────────────────
-        console.log(`${logPrefix} 🔍 Validating embedding...`);
         if (!Array.isArray(embedding) || embedding.length < 128) {
             console.warn(`${logPrefix} ❌ Invalid embedding payload`, {
                 isArray: Array.isArray(embedding),
@@ -256,10 +175,7 @@ exports.verifyFace = async (req, res) => {
                 message: 'Invalid embedding payload.',
             });
         }
-        console.log(`${logPrefix} ✅ Embedding valid (length=${embedding.length})`);
 
-        // ── Load enrolled record ─────────────────────────────────────
-        console.log(`${logPrefix} 🔍 Loading active FaceEmbedding for userId=${req.user.id}...`);
         const record = await FaceEmbedding.findOne({
             employee: req.user.id,
             isActive: true,
@@ -274,21 +190,7 @@ exports.verifyFace = async (req, res) => {
             });
         }
 
-        console.log(`${logPrefix} 📋 Enrolled record found`, {
-            recordId: record._id,
-            model: record.model,
-            embeddingSize: record.embedding.length,
-            enrolledAt: record.enrolledAt,
-        });
-
-        // ── Compare faces ────────────────────────────────────────────
-        console.log(`${logPrefix} 🧠 Running verifyFaceMatch (threshold=0.80)...`);
         const result = verifyFaceMatch(embedding, record.embedding, 0.80);
-        console.log(`${logPrefix} 📊 Match result:`, {
-            matched: result.matched,
-            similarity: result.similarity,
-            threshold: result.threshold,
-        });
 
         if (!result.matched) {
             console.warn(`${logPrefix} ❌ FACE_MISMATCH`, {
@@ -303,24 +205,12 @@ exports.verifyFace = async (req, res) => {
                 threshold: result.threshold,
             });
         }
-
-        // ── Attendance state check ───────────────────────────────────
-        console.log(`${logPrefix} 📅 Loading today's attendance (IST midnight)...`);
         const today = getISTMidnight();
-        console.log(`${logPrefix} 📅 Today (IST midnight):`, today);
 
         const attendance = await Attendance.findOne({
             employee: req.user.id,
             date: today,
         });
-
-        console.log(`${logPrefix} 📋 Attendance record:`, attendance
-            ? {
-                id: attendance._id,
-                checkIn: attendance.checkIn?.time || null,
-                checkOut: attendance.checkOut?.time || null,
-            }
-            : 'none');
 
         if (action === 'check-out' && !attendance?.checkIn?.time) {
             console.warn(`${logPrefix} ❌ NO_CHECK_IN — cannot check out without check-in`, {
@@ -334,13 +224,6 @@ exports.verifyFace = async (req, res) => {
                 message: 'Please check in first.',
             });
         }
-
-        console.log(`${logPrefix} ✅ Face verified — returning success`, {
-            action,
-            similarity: result.similarity,
-            hasCheckedIn: !!attendance?.checkIn?.time,
-            hasCheckedOut: !!attendance?.checkOut?.time,
-        });
 
         return res.json({
             success: true,
@@ -406,10 +289,6 @@ exports.listEnrollments = async (req, res) => {
             search,
         } = req.query;
 
-        console.log(`${logPrefix} ▶️ Request from role=${req.user.role}`, {
-            page, limit, isActive, model, search,
-        });
-
         const filter = {};
         if (isActive !== undefined) filter.isActive = isActive === 'true';
         if (model) filter.model = model;
@@ -435,8 +314,6 @@ exports.listEnrollments = async (req, res) => {
                 .select('-embedding'), // never send raw embeddings in list view
             FaceEmbedding.countDocuments(filter),
         ]);
-
-        console.log(`${logPrefix} ✅ Found ${records.length}/${total} records`);
 
         return res.json({
             success: true,
@@ -496,11 +373,6 @@ exports.adminEnrollFace = async (req, res) => {
             referenceImageUrl,
         } = req.body;
 
-        console.log(`${logPrefix} ▶️ Admin enrolling for employee=${employeeId}`, {
-            adminId: req.user.id,
-            embeddingLength: Array.isArray(embedding) ? embedding.length : null,
-        });
-
         // Validate employee exists
         const employee = await User.findById(employeeId);
         if (!employee) {
@@ -537,10 +409,6 @@ exports.adminEnrollFace = async (req, res) => {
             },
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
-
-        console.log(`${logPrefix} ✅ Enrolled for ${employee.name}`, {
-            recordId: record._id,
-        });
 
         return res.status(200).json({
             success: true,

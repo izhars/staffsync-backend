@@ -1,20 +1,32 @@
+// routes/callRoutes.js
 const express = require('express');
-const { 
-  startCall, 
-  acceptCall, 
-  declineCall, 
+const router = express.Router();
+
+const {
+  startCall,
+  acceptCall,
+  declineCall,
   endCall,
   getCallById,
-  getOngoingCalls 
+  getOngoingCalls,
 } = require('../controllers/callController');
-const router = express.Router();
-const { protect, authorize } = require('../middleware/auth');
 
-router.post('/start', protect, startCall);
-router.post('/accept', protect, acceptCall);
-router.post('/decline', protect, declineCall);
-router.post('/end', protect, endCall);
-router.get('/:callId', protect, getCallById);
-router.get('/ongoing/:userId', protect, getOngoingCalls);
+const { protect } = require('../middleware/auth');
+
+router.use(protect);
+
+// ─────────────────────────────────────────────
+// Static routes
+// ─────────────────────────────────────────────
+router.post('/start', startCall);
+router.post('/accept', acceptCall);
+router.post('/decline', declineCall);
+router.post('/end', endCall);
+
+// ─────────────────────────────────────────────
+// Parameterized routes — MUST come after static
+// ─────────────────────────────────────────────
+router.get('/ongoing/:userId', getOngoingCalls);
+router.get('/:callId', getCallById);
 
 module.exports = router;

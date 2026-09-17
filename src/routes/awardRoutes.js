@@ -1,24 +1,42 @@
+// routes/awardRoutes.js
 const express = require('express');
+const { protect, hrAdminAndAbove, superAdminOnly } = require('../middleware/auth');
+
 const {
   createAward,
   getAwards,
   getAward,
   updateAward,
   deleteAward,
-  getMyAwards
+  getMyAwards,
 } = require('../controllers/awardController');
-
-const { protect, hrAndAbove, superAdminOnly } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Public route for employees to see their own awards
+// ─────────────────────────────────────────────
+// Employee self-service
+// ─────────────────────────────────────────────
 router.get('/me', protect, getMyAwards);
-// Protected routes (HR & above)
-router.use(protect, hrAndAbove);
-router .route('/') .post(createAward) .get(getAwards);
-router .route('/:id')  .get(getAward).put(updateAward);
-// Superadmin only
-router.route('/:id').delete(protect, superAdminOnly, deleteAward);
+
+// ─────────────────────────────────────────────
+// HR & above
+// ─────────────────────────────────────────────
+router.use(protect, hrAdminAndAbove);
+
+router.route('/')
+  .post(createAward)
+  .get(getAwards);
+
+// ─────────────────────────────────────────────
+// Parameterized routes
+// ─────────────────────────────────────────────
+router.route('/:id')
+  .get(getAward)
+  .put(updateAward);
+
+// ─────────────────────────────────────────────
+// Super-admin only
+// ─────────────────────────────────────────────
+router.delete('/:id', superAdminOnly, deleteAward);
 
 module.exports = router;

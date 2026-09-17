@@ -1,6 +1,13 @@
+// routes/geoFenceRoutes.js
 const express = require('express');
 const router = express.Router();
-const { protect, authorize } = require('../middleware/auth');
+
+const {
+  protect,
+  hrAdminAndAbove,
+  managerAndAbove,
+} = require('../middleware/auth');
+
 const {
   createLocation,
   getAllLocations,
@@ -12,27 +19,43 @@ const {
   checkLocation,
 } = require('../controllers/geoFenceController');
 
+// All routes below require authentication
 router.use(protect);
 
-// Employee routes
+// ─────────────────────────────────────────────
+// Employee routes (any authenticated user)
+// ─────────────────────────────────────────────
 router.get('/my-locations', getMyLocations);
 router.post('/check', checkLocation);
 
-// HR/Admin routes
+// ─────────────────────────────────────────────
+// Location collection
+//   GET  → manager and above (read-only)
+//   POST → HR admin and above (write)
+// ─────────────────────────────────────────────
 router
   .route('/locations')
-  .get(authorize('hr', 'superadmin', 'manager'), getAllLocations)
-  .post(authorize('hr', 'superadmin'), createLocation);
+  .get(managerAndAbove, getAllLocations)
+  .post(hrAdminAndAbove, createLocation);
 
+// ─────────────────────────────────────────────
+// Single location
+//   GET    → manager and above (read-only)
+//   PUT    → HR admin and above
+//   DELETE → HR admin and above
+// ─────────────────────────────────────────────
 router
   .route('/locations/:id')
-  .get(authorize('hr', 'superadmin', 'manager'), getLocationById)
-  .put(authorize('hr', 'superadmin'), updateLocation)
-  .delete(authorize('hr', 'superadmin'), deleteLocation);
+  .get(managerAndAbove, getLocationById)
+  .put(hrAdminAndAbove, updateLocation)
+  .delete(hrAdminAndAbove, deleteLocation);
 
+// ─────────────────────────────────────────────
+// Toggle active/inactive status
+// ─────────────────────────────────────────────
 router.patch(
   '/locations/:id/toggle',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   toggleLocationStatus
 );
 

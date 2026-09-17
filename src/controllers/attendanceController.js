@@ -6,6 +6,7 @@ const ComboOff = require('../models/ComboOff');
 const moment = require('moment-timezone');
 const RestrictedHolidayUsage = require('../models/RestrictedHolidayUsage');
 const { isWithinAnyGeoFence } = require('../utils/geoFence');
+const { ACCESS_ROLES, NON_ADMIN_ROLES, } = require('../constants/roles');
 const {
   evaluatePunchVerification,
   PRIVILEGED_ROLES,
@@ -271,15 +272,15 @@ exports.checkIn = async (req, res) => {
       time: checkInTime,
       location: hasCoords
         ? {
-            latitude,
-            longitude,
-            address,
-            matchedLocationName: geoCheck.matchedLocation?.name,
-            distanceFromOffice: geoCheck.matchedLocation?.distance,
-          }
+          latitude,
+          longitude,
+          address,
+          matchedLocationName: geoCheck.matchedLocation?.name,
+          distanceFromOffice: geoCheck.matchedLocation?.distance,
+        }
         : {
-            address: address || 'Desktop / No GPS',
-          },
+          address: address || 'Desktop / No GPS',
+        },
       deviceInfo,
       punchedFrom: verification.punchedFrom,
       verificationMethod: requiresFace
@@ -522,15 +523,15 @@ exports.checkOut = async (req, res) => {
       time: checkOutTime,
       location: hasCoords
         ? {
-            latitude,
-            longitude,
-            address,
-            matchedLocationName: geoCheck.matchedLocation?.name,
-            distanceFromOffice: geoCheck.matchedLocation?.distance,
-          }
+          latitude,
+          longitude,
+          address,
+          matchedLocationName: geoCheck.matchedLocation?.name,
+          distanceFromOffice: geoCheck.matchedLocation?.distance,
+        }
         : {
-            address: address || 'Desktop / No GPS',
-          },
+          address: address || 'Desktop / No GPS',
+        },
       deviceInfo,
       punchedFrom: verification.punchedFrom,
       verificationMethod: requiresFace
@@ -660,7 +661,8 @@ function computeWorkHours(checkInTime, checkOutTime) {
 // @access  Private
 exports.getMyAttendance = async (req, res) => {
   try {
-    const { startDate, endDate, month, year } = req.query;
+    const { startDate, endDate, month, year, employeeId: queryEmployeeId } = req.query;
+
     const employeeId = req.user.id;
 
     const user = await User.findById(employeeId)
@@ -680,19 +682,19 @@ exports.getMyAttendance = async (req, res) => {
 
     if (startDate && endDate) {
       start = moment.tz(startDate, "Asia/Kolkata").startOf("day");
-      end   = moment.tz(endDate,   "Asia/Kolkata").endOf("day");
+      end = moment.tz(endDate, "Asia/Kolkata").endOf("day");
     } else if (month && year) {
       start = moment.tz({ year, month: month - 1, day: 1 }, "Asia/Kolkata").startOf("day");
-      end   = moment(start).endOf("month");
+      end = moment(start).endOf("month");
     } else {
       start = moment.tz("Asia/Kolkata").startOf("month");
-      end   = moment(start).endOf("month");
+      end = moment(start).endOf("month");
     }
 
     start = moment.max(start, doj);
 
     const startUTC = start.clone().utc().toDate();
-    const endUTC   = end.clone().utc().toDate();
+    const endUTC = end.clone().utc().toDate();
 
     const [attendance, holidays, comboOffs, leaves] = await Promise.all([
       Attendance.find({
@@ -714,7 +716,7 @@ exports.getMyAttendance = async (req, res) => {
       Leave.find({
         employee: employeeId,
         fromDate: { $lte: endUTC },
-        toDate:   { $gte: startUTC },
+        toDate: { $gte: startUTC },
         status: "approved",
       }).lean(),
     ]);
@@ -758,10 +760,10 @@ exports.getMyAttendance = async (req, res) => {
       const dateKey = current.format("YYYY-MM-DD");
       const day = getISTDay(current);
 
-      const record   = attendanceMap.get(dateKey);
-      const holiday  = holidayMap.get(dateKey);
+      const record = attendanceMap.get(dateKey);
+      const holiday = holidayMap.get(dateKey);
       const comboOff = comboOffMap.get(dateKey);
-      const leave    = leaveMap.get(dateKey);
+      const leave = leaveMap.get(dateKey);
 
       let isWeekend = false;
       if (weekendType === "sunday") {
@@ -905,6 +907,281 @@ exports.getMyAttendance = async (req, res) => {
   }
 };
 
+
+exports.getEmployeeAttendancWithCalender = async (req, res) => {
+  try {
+    const { startDate, endDate, month, year } = req.query;
+
+    // ✅ ONLY DIFFERENCE: employee comes from params/query, not req.user
+    const employeeId = req.params.employeeId || req.query.employeeId;
+
+    if (!employeeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'employeeId is required',
+      });
+    }
+
+    const user = await User.findById(employeeId).select(
+      'name email employeeId department designation weekendType dateOfJoining'
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Employee not found',
+      });
+    }
+
+    const weekendType = user.weekendType || 'sunday';
+    const doj = moment(user.dateOfJoining).tz('Asia/Kolkata').startOf('day');
+
+    let start, end;
+
+    if (startDate && endDate) {
+      start = moment.tz(startDate, 'Asia/Kolkata').startOf('day');
+      end = moment.tz(endDate, 'Asia/Kolkata').endOf('day');
+    } else if (month && year) {
+      start = moment
+        .tz({ year, month: month - 1, day: 1 }, 'Asia/Kolkata')
+        .startOf('day');
+      end = moment(start).endOf('month');
+    } else {
+      start = moment.tz('Asia/Kolkata').startOf('month');
+      end = moment(start).endOf('month');
+    }
+
+    start = moment.max(start, doj);
+
+    const startUTC = start.clone().utc().toDate();
+    const endUTC = end.clone().utc().toDate();
+
+    const [attendance, holidays, comboOffs, leaves] = await Promise.all([
+      Attendance.find({
+        employee: employeeId,
+        date: { $gte: startUTC, $lte: endUTC },
+      })
+        .sort({ date: -1 })
+        .lean(),
+
+      Holiday.find({
+        date: { $gte: startUTC, $lte: endUTC },
+        isActive: true,
+      }).lean(),
+
+      ComboOff.find({
+        employee: employeeId,
+        date: { $gte: startUTC, $lte: endUTC },
+        status: { $in: ['approved', 'used', 'earned'] },
+      }).lean(),
+
+      Leave.find({
+        employee: employeeId,
+        fromDate: { $lte: endUTC },
+        toDate: { $gte: startUTC },
+        status: 'approved',
+      }).lean(),
+    ]);
+
+    const holidayMap = new Map(
+      holidays.map(h => [
+        moment(h.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        { name: h.name, type: h.type, category: h.category },
+      ])
+    );
+
+    const attendanceMap = new Map(
+      attendance.map(a => [
+        moment(a.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        a,
+      ])
+    );
+
+    const comboOffMap = new Map(
+      comboOffs.map(c => [
+        moment(c.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        c,
+      ])
+    );
+
+    const leaveMap = new Map();
+    leaves.forEach(l => {
+      let d = moment(l.fromDate).tz('Asia/Kolkata').startOf('day');
+      const last = moment(l.toDate).tz('Asia/Kolkata').startOf('day');
+      while (d.isSameOrBefore(last, 'day')) {
+        leaveMap.set(d.format('YYYY-MM-DD'), l);
+        d.add(1, 'day');
+      }
+    });
+
+    const today = moment.tz('Asia/Kolkata').startOf('day');
+    const totalDays = [];
+    let current = start.clone();
+
+    while (
+      current.isSameOrBefore(end, 'day') &&
+      current.isSameOrBefore(today, 'day')
+    ) {
+      const dateKey = current.format('YYYY-MM-DD');
+      const day = getISTDay(current);
+
+      const record = attendanceMap.get(dateKey);
+      const holiday = holidayMap.get(dateKey);
+      const comboOff = comboOffMap.get(dateKey);
+      const leave = leaveMap.get(dateKey);
+
+      let isWeekend = false;
+      if (weekendType === 'sunday') {
+        isWeekend = day === 0;
+      } else if (weekendType === 'saturday_sunday') {
+        isWeekend = day === 0 || day === 6;
+      }
+
+      // Priority: Combo-off → Leave → Attendance → Holiday → Weekend → Absent
+      if (comboOff) {
+        totalDays.push({
+          date: dateKey,
+          status: 'combo-off',
+          comboOffStatus: comboOff.status,
+          remarks: comboOff.remarks || null,
+          approvedBy: comboOff.approvedBy || null,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (leave) {
+        totalDays.push({
+          date: dateKey,
+          status: 'on-leave',
+          leaveType: leave.type || leave.leaveType,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (record) {
+        const isToday = current.isSame(today, 'day');
+
+        let workHours = record.workHours || 0;
+        if (isToday) {
+          workHours = getCurrentWorkHours(record);
+        } else if (record.checkIn?.time && record.checkOut?.time) {
+          workHours = computeWorkHours(
+            record.checkIn.time,
+            record.checkOut.time
+          );
+        }
+
+        const missedCheckout =
+          !isToday && !!record.checkIn?.time && !record.checkOut?.time;
+
+        const {
+          _id,
+          employee,
+          createdAt,
+          updatedAt,
+          __v,
+          ...cleanRecord
+        } = record;
+
+        totalDays.push({
+          ...cleanRecord,
+          date: dateKey,
+          status: record.status || 'present',
+          workHours,
+          missedCheckout,
+          holidayName: holiday?.name || null,
+          holidayType: holiday?.type || null,
+          isRestrictedHoliday: holiday?.category === 'Restricted',
+          isWeeklyOffWork: isWeekend || false,
+          checkInTimeFormatted: record.checkIn?.time
+            ? formatISTTime(record.checkIn.time)
+            : null,
+          checkOutTimeFormatted: record.checkOut?.time
+            ? formatISTTime(record.checkOut.time)
+            : null,
+        });
+      } else if (holiday) {
+        totalDays.push({
+          date: dateKey,
+          status: 'holiday',
+          holidayName: holiday.name,
+          holidayType: holiday.type,
+          holidayCategory: holiday.category,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (isWeekend) {
+        totalDays.push({
+          date: dateKey,
+          status: 'weekly-off',
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else {
+        totalDays.push({
+          date: dateKey,
+          status: 'absent',
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      }
+
+      current.add(1, 'day');
+    }
+
+    const stats = {
+      totalDays: totalDays.length,
+      present: totalDays.filter(a => a.status === 'present').length,
+      absent: totalDays.filter(a => a.status === 'absent').length,
+      halfDay: totalDays.filter(a => a.status === 'half-day').length,
+      onLeave: totalDays.filter(a => a.status === 'on-leave').length,
+      holiday: totalDays.filter(a => a.status === 'holiday').length,
+      weeklyOff: totalDays.filter(a => a.status === 'weekly-off').length,
+      comboOff: totalDays.filter(a => a.status === 'combo-off').length,
+
+      totalWorkHours: Number(
+        totalDays.reduce((s, a) => s + (a.workHours || 0), 0).toFixed(2)
+      ),
+      lateCount: totalDays.filter(a => a.isLate).length,
+
+      workedOnHoliday: totalDays.filter(
+        a => a.status === 'present' && a.holidayName
+      ).length,
+      workedOnWeeklyOff: totalDays.filter(
+        a => a.status === 'present' && a.isWeeklyOffWork
+      ).length,
+      missedCheckouts: totalDays.filter(a => a.missedCheckout).length,
+    };
+
+    res.status(200).json({
+      success: true,
+      employee: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        employeeId: user.employeeId,
+        department: user.department,
+        designation: user.designation,
+      },
+      count: totalDays.length,
+      stats,
+      attendance: totalDays,
+    });
+  } catch (error) {
+    console.error('HR attendance fetch error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
 // @desc    Get today's attendance
 // @route   GET /api/attendance/today
 // @access  Private
@@ -964,283 +1241,6 @@ exports.getTodayAttendance = async (req, res) => {
     });
   } catch (error) {
     console.error('Get today attendance error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-
-// @desc    Get employee attendance (for managers/HR)
-// @route   GET /api/attendance/employee/:employeeId
-// @access  Private (Manager, HR, Admin)
-exports.getMyAttendance = async (req, res) => {
-  try {
-    const { startDate, endDate, month, year } = req.query;
-    const employeeId = req.user.id;
-
-    // ── 1. Fetch user context ─────────────────────────────────────────
-    const user = await User.findById(employeeId)
-      .select("weekendType dateOfJoining");
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "Employee not found",
-      });
-    }
-
-    const weekendType = user.weekendType || "sunday";
-    const doj = moment(user.dateOfJoining).tz("Asia/Kolkata").startOf("day");
-
-    // ── 2. Date range setup ───────────────────────────────────────────
-    let start, end;
-
-    if (startDate && endDate) {
-      start = moment.tz(startDate, "Asia/Kolkata").startOf("day");
-      end   = moment.tz(endDate,   "Asia/Kolkata").endOf("day");
-    } else if (month && year) {
-      start = moment.tz({ year, month: month - 1, day: 1 }, "Asia/Kolkata").startOf("day");
-      end   = moment(start).endOf("month");
-    } else {
-      start = moment.tz("Asia/Kolkata").startOf("month");
-      end   = moment(start).endOf("month");
-    }
-
-    // Don't mark days before joining
-    start = moment.max(start, doj);
-
-    const startUTC = start.clone().utc().toDate();
-    const endUTC   = end.clone().utc().toDate();
-
-    // ── 3. Fetch all data in parallel ─────────────────────────────────
-    const [attendance, holidays, comboOffs, leaves] = await Promise.all([
-      Attendance.find({
-        employee: employeeId,
-        date: { $gte: startUTC, $lte: endUTC },
-      }).sort({ date: -1 }).lean(),
-
-      Holiday.find({
-        date: { $gte: startUTC, $lte: endUTC },
-        isActive: true,
-      }).lean(),
-
-      ComboOff.find({
-        employee: employeeId,
-        date: { $gte: startUTC, $lte: endUTC },
-        status: { $in: ["approved", "used", "earned"] },
-      }).lean(),
-
-      Leave.find({
-        employee: employeeId,
-        fromDate: { $lte: endUTC },
-        toDate:   { $gte: startUTC },
-        status: "approved",
-      }).lean(),
-    ]);
-
-    // ── 4. Build lookup maps ──────────────────────────────────────────
-    const holidayMap = new Map(
-      holidays.map(h => [
-        moment(h.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
-        { name: h.name, type: h.type },
-      ])
-    );
-
-    const attendanceMap = new Map(
-      attendance.map(a => [
-        moment(a.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
-        a,
-      ])
-    );
-
-    const comboOffMap = new Map(
-      comboOffs.map(c => [
-        moment(c.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
-        c,
-      ])
-    );
-
-    // Expand leave ranges into per-day entries
-    const leaveMap = new Map();
-    leaves.forEach(l => {
-      let d = moment(l.fromDate).tz("Asia/Kolkata").startOf("day");
-      const last = moment(l.toDate).tz("Asia/Kolkata").startOf("day");
-      while (d.isSameOrBefore(last, "day")) {
-        leaveMap.set(d.format("YYYY-MM-DD"), l);
-        d.add(1, "day");
-      }
-    });
-
-    // ── 5. Build attendance list day by day ──────────────────────────
-    const today = moment.tz("Asia/Kolkata").startOf("day");
-    const totalDays = [];
-    let current = start.clone();
-
-    while (current.isSameOrBefore(end, "day") && current.isSameOrBefore(today, "day")) {
-      const dateKey = current.format("YYYY-MM-DD");
-      const day = getISTDay(current); // 0 = Sun, 6 = Sat
-
-      const record   = attendanceMap.get(dateKey);
-      const holiday  = holidayMap.get(dateKey);
-      const comboOff = comboOffMap.get(dateKey);
-      const leave    = leaveMap.get(dateKey);
-
-      let isWeekend = false;
-      if (weekendType === "sunday") {
-        isWeekend = day === 0;
-      } else if (weekendType === "saturday_sunday") {
-        isWeekend = day === 0 || day === 6;
-      }
-
-      // ── Priority: Combo-off → Leave → Attendance → Holiday → Weekend → Absent
-
-      // 1. Combo-off
-      if (comboOff) {
-        totalDays.push({
-          date: dateKey,
-          status: "combo-off",
-          comboOffStatus: comboOff.status,
-          remarks: comboOff.remarks || null,
-          approvedBy: comboOff.approvedBy || null,
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      }
-
-      // 2. Leave
-      else if (leave) {
-        totalDays.push({
-          date: dateKey,
-          status: "on-leave",
-          leaveType: leave.type || leave.leaveType,
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      }
-
-      // 3. Attendance — real punch wins over holiday/weekend
-      else if (record) {
-        const isToday = current.isSame(today, "day");
-
-        let workHours = record.workHours || 0;
-        if (isToday) {
-          workHours = getCurrentWorkHours(record);
-        } else if (record.checkIn?.time && record.checkOut?.time) {
-          workHours = computeWorkHours(record.checkIn.time, record.checkOut.time);
-        }
-
-        const missedCheckout =
-          !isToday && !!record.checkIn?.time && !record.checkOut?.time;
-
-        // Strip Mongoose internals
-        const {
-          _id, employee, createdAt, updatedAt, __v,
-          ...cleanRecord
-        } = record;
-
-        totalDays.push({
-          ...cleanRecord,
-          date: dateKey,
-          status: record.status || "present",
-          workHours,
-          missedCheckout,
-
-          // Holiday/weekend context so UI can still show badges
-          holidayName: holiday?.name || null,
-          holidayType: holiday?.type || null,
-          isRestrictedHoliday: holiday?.type === "Restricted",
-          isWeeklyOffWork: isWeekend || false,
-
-          checkInTimeFormatted: record.checkIn?.time
-            ? formatISTTime(record.checkIn.time)
-            : null,
-          checkOutTimeFormatted: record.checkOut?.time
-            ? formatISTTime(record.checkOut.time)
-            : null,
-        });
-      }
-
-      // 4. Holiday — only if no real attendance
-      else if (holiday) {
-        totalDays.push({
-          date: dateKey,
-          status: "holiday",
-          holidayName: holiday.name,
-          holidayType: holiday.type,
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      }
-
-      // 5. Weekend
-      else if (isWeekend) {
-        totalDays.push({
-          date: dateKey,
-          status: "weekly-off",
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      }
-
-      // 6. Absent
-      else {
-        totalDays.push({
-          date: dateKey,
-          status: "absent",
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      }
-
-      current.add(1, "day");
-    }
-
-    // ── 6. Summary stats ──────────────────────────────────────────────
-    const stats = {
-      totalDays: totalDays.length,
-
-      present: totalDays.filter(a => a.status === "present").length,
-      absent: totalDays.filter(a => a.status === "absent").length,
-      halfDay: totalDays.filter(a => a.status === "half-day").length,
-      onLeave: totalDays.filter(a => a.status === "on-leave").length,
-      holiday: totalDays.filter(a => a.status === "holiday").length,
-      weeklyOff: totalDays.filter(a => a.status === "weekly-off").length,
-      comboOff: totalDays.filter(a => a.status === "combo-off").length,
-
-      totalWorkHours: Number(
-        totalDays.reduce((s, a) => s + (a.workHours || 0), 0).toFixed(2)
-      ),
-      lateCount: totalDays.filter(a => a.isLate).length,
-
-      // Extra insight counters
-      workedOnHoliday: totalDays.filter(
-        a => a.status === "present" && a.holidayName
-      ).length,
-      workedOnWeeklyOff: totalDays.filter(
-        a => a.status === "present" && a.isWeeklyOffWork
-      ).length,
-      missedCheckouts: totalDays.filter(a => a.missedCheckout).length,
-    };
-
-    // ── 7. Response ───────────────────────────────────────────────────
-    res.status(200).json({
-      success: true,
-      count: totalDays.length,
-      stats,
-      attendance: totalDays,
-    });
-
-  } catch (error) {
-    console.error("Attendance fetch error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -1538,7 +1538,7 @@ exports.getAttendanceStatus = async (req, res) => {
     const leave = await Leave.findOne({
       employee: req.user.id,
       fromDate: { $lte: today },
-      toDate:   { $gte: today },
+      toDate: { $gte: today },
       status: 'approved',
     }).lean();
 
@@ -1757,9 +1757,10 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
     const today = getISTMidnight();
     const { department } = req.query;
 
-    const rolesToInclude = ['employee', 'manager', 'hr'];
-
-    const employeeQuery = { isActive: true, role: { $in: rolesToInclude } };
+    const employeeQuery = {
+      isActive: true,
+      role: { $in: NON_ADMIN_ROLES }
+    };
     if (department) employeeQuery.department = department;
 
     const employees = await User.find(employeeQuery)
@@ -1794,7 +1795,7 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
       Leave.find({
         employee: { $in: employeeIds },
         fromDate: { $lte: today },
-        toDate:   { $gte: today },
+        toDate: { $gte: today },
         status: 'approved',
       }).lean(),
 
@@ -1871,13 +1872,13 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
           },
           checkOut: record.checkOut?.time
             ? {
-                time: formatISTTime(record.checkOut.time),
-                rawTime: record.checkOut.time,
-                location: record.checkOut.location,
-                deviceInfo: record.checkOut.deviceInfo,
-                punchedFrom: record.checkOut.punchedFrom,
-                verificationMethod: record.checkOut.verificationMethod,
-              }
+              time: formatISTTime(record.checkOut.time),
+              rawTime: record.checkOut.time,
+              location: record.checkOut.location,
+              deviceInfo: record.checkOut.deviceInfo,
+              punchedFrom: record.checkOut.punchedFrom,
+              verificationMethod: record.checkOut.verificationMethod,
+            }
             : null,
           workHours: getCurrentWorkHours(record),
           isLate: record.isLate || false,
@@ -1924,13 +1925,13 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
       }
     }
 
-    const presentCount    = todayAttendance.filter(a => a.status === 'present').length;
-    const absentCount     = todayAttendance.filter(a => a.status === 'absent').length;
-    const onLeaveCount    = todayAttendance.filter(a => a.status === 'on-leave').length;
-    const weeklyOffCount  = todayAttendance.filter(a => a.status === 'weekly-off').length;
-    const comboOffCount   = todayAttendance.filter(a => a.status === 'combo-off').length;
-    const holidayCount    = todayAttendance.filter(a => a.status === 'holiday').length;
-    const lateCount       = todayAttendance.filter(a => a.isLate).length;
+    const presentCount = todayAttendance.filter(a => a.status === 'present').length;
+    const absentCount = todayAttendance.filter(a => a.status === 'absent').length;
+    const onLeaveCount = todayAttendance.filter(a => a.status === 'on-leave').length;
+    const weeklyOffCount = todayAttendance.filter(a => a.status === 'weekly-off').length;
+    const comboOffCount = todayAttendance.filter(a => a.status === 'combo-off').length;
+    const holidayCount = todayAttendance.filter(a => a.status === 'holiday').length;
+    const lateCount = todayAttendance.filter(a => a.isLate).length;
 
     res.status(200).json({
       success: true,
@@ -1970,8 +1971,10 @@ exports.getAllEmployeesAttendance = async (req, res) => {
       targetDate = getISTMidnight();
     }
 
-    const rolesToInclude = ['employee', 'manager', 'hr'];
-    const employeeQuery = { isActive: true, role: { $in: rolesToInclude } };
+    const employeeQuery = {
+      isActive: true,
+      role: { $in: NON_ADMIN_ROLES }
+    };
     if (department) employeeQuery.department = department;
 
     const employees = await User.find(employeeQuery)
@@ -2006,7 +2009,7 @@ exports.getAllEmployeesAttendance = async (req, res) => {
       Leave.find({
         employee: { $in: employeeIds },
         fromDate: { $lte: targetDate },
-        toDate:   { $gte: targetDate },
+        toDate: { $gte: targetDate },
         status: 'approved',
       }).lean(),
 
@@ -2079,8 +2082,8 @@ exports.getAllEmployeesAttendance = async (req, res) => {
         const workHours = isToday
           ? getCurrentWorkHours(record)
           : (record.checkOut?.time
-              ? computeWorkHours(record.checkIn.time, record.checkOut.time)
-              : record.workHours || 0);
+            ? computeWorkHours(record.checkIn.time, record.checkOut.time)
+            : record.workHours || 0);
 
         const missedCheckout = !isToday && !record.checkOut?.time;
 
@@ -2098,14 +2101,14 @@ exports.getAllEmployeesAttendance = async (req, res) => {
           },
           checkOut: record.checkOut?.time
             ? {
-                time: formatISTTime(record.checkOut.time),
-                rawTime: record.checkOut.time,
-                location: record.checkOut.location,
-                deviceInfo: record.checkOut.deviceInfo,
-                punchedFrom: record.checkOut.punchedFrom,
-                verificationMethod: record.checkOut.verificationMethod,
-                isGpsBypassed: record.checkOut.isGpsBypassed,
-              }
+              time: formatISTTime(record.checkOut.time),
+              rawTime: record.checkOut.time,
+              location: record.checkOut.location,
+              deviceInfo: record.checkOut.deviceInfo,
+              punchedFrom: record.checkOut.punchedFrom,
+              verificationMethod: record.checkOut.verificationMethod,
+              isGpsBypassed: record.checkOut.isGpsBypassed,
+            }
             : null,
           workHours,
           missedCheckout,

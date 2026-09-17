@@ -1,7 +1,12 @@
 // routes/faceRoutes.js
 const express = require('express');
 const router = express.Router();
-const { protect, authorize } = require('../middleware/auth');
+
+const {
+  protect,
+  hrAdminAndAbove,   // super_admin + hr_admin
+} = require('../middleware/auth');
+
 const {
   // Employee self-service
   registerFace,
@@ -21,75 +26,82 @@ const {
   bulkDeleteEnrollments,
 } = require('../controllers/faceController');
 
+// All routes below require authentication
 router.use(protect);
 
-// ── Employee self-service ─────────────────────────────────────
+// ─────────────────────────────────────────────
+// Employee self-service (any authenticated user)
+// ─────────────────────────────────────────────
 router.post('/register', registerFace);
 router.post('/verify', verifyFace);
 router.get('/status', getFaceStatus);
 router.delete('/enrollments', deleteFace);
 
-// ── Debug / utility (any authenticated user) ──────────────────
+// ─────────────────────────────────────────────
+// Debug / utility (any authenticated user)
+// ─────────────────────────────────────────────
 router.post('/compare', compareEmbeddings);
 
-// ── HR/Admin — manage any employee ───────────────────────────
+// ─────────────────────────────────────────────
+// HR/Admin — manage any employee
+// ─────────────────────────────────────────────
 router.delete(
   '/enrollments/:employeeId',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   deleteFace
 );
 
 router.get(
   '/admin/enrollments',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   listEnrollments
 );
 
 router.get(
   '/admin/enrollments/:employeeId',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   getEnrollmentByEmployee
 );
 
 router.post(
   '/admin/enroll/:employeeId',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   adminEnrollFace
 );
 
 router.patch(
   '/admin/enrollments/:employeeId/toggle',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   toggleEnrollment
 );
 
 router.get(
   '/admin/stats',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   getEnrollmentStats
 );
 
 router.get(
   '/admin/not-enrolled',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   listNotEnrolled
 );
 
 router.post(
   '/admin/verify-against/:employeeId',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   adminVerifyAgainstEmployee
 );
 
 router.get(
   '/admin/export',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   exportEnrollments
 );
 
 router.delete(
   '/admin/enrollments/bulk',
-  authorize('hr', 'superadmin'),
+  hrAdminAndAbove,
   bulkDeleteEnrollments
 );
 

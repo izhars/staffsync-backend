@@ -1,6 +1,9 @@
+// routes/assetRoutes.js
 const express = require('express');
 const router = express.Router();
-const { protect, authorize } = require('../middleware/auth');
+
+const { protect, hrAdminAndAbove } = require('../middleware/auth');
+
 const {
   getAllAssets,
   getMyAssets,
@@ -10,37 +13,32 @@ const {
   assignAsset,
   returnAsset,
   deleteAsset,
-  changeAssetStatus
+  changeAssetStatus,
 } = require('../controllers/assetController');
 
 router.use(protect);
 
-router.route('/')
-  .get(authorize('hr', 'superadmin'), getAllAssets)
-  .post(authorize('hr', 'superadmin'), createAsset);
-
+// ─────────────────────────────────────────────
+// Static / collection routes
+// ─────────────────────────────────────────────
 router.get('/my-assets', getMyAssets);
 
-router.route('/:id')
+router
+  .route('/')
+  .get(hrAdminAndAbove, getAllAssets)
+  .post(hrAdminAndAbove, createAsset);
+
+// ─────────────────────────────────────────────
+// Parameterized routes
+// ─────────────────────────────────────────────
+router
+  .route('/:id')
   .get(getAsset)
-  .put(authorize('hr', 'superadmin'), updateAsset)
-  .delete(authorize('hr','superadmin'), deleteAsset);
+  .put(hrAdminAndAbove, updateAsset)
+  .delete(hrAdminAndAbove, deleteAsset);
 
-router.put('/:id/assign', 
-  authorize('hr', 'superadmin'), 
-  assignAsset
-);
-
-router.put('/:id/return', 
-  authorize('hr', 'superadmin'), 
-  returnAsset
-);
-
-router.put('/:id/status',
-  authorize('hr', 'superadmin'),
-  changeAssetStatus
-);
-
-
+router.put('/:id/assign', hrAdminAndAbove, assignAsset);
+router.put('/:id/return', hrAdminAndAbove, returnAsset);
+router.put('/:id/status', hrAdminAndAbove, changeAssetStatus);
 
 module.exports = router;

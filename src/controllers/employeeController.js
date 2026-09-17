@@ -18,7 +18,7 @@ exports.getAllEmployees = async (req, res) => {
     } = req.query;
     
     // ✅ Build query to include both employee and manager
-    const query = { role: { $in: ['employee', 'manager'] } };
+    const query = { role: { $in: ['employee', 'manager', 'hr_admin'] } };
 
     if (search) {
       query.$or = [
@@ -130,7 +130,6 @@ exports.getEmployeeList = async (req, res) => {
     });
   }
 };
-
 
 
 // @desc    Get all HR employees

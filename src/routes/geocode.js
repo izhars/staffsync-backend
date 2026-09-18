@@ -1,77 +1,58 @@
-// routes/geocode.js
-const express = require("express");
+const express = require('express');
+
 const router = express.Router();
 
-const OLA_MAPS_API_KEY = process.env.OLA_MAPS_API_KEY;
+const OLA_KEY = process.env.OLA_MAPS_API_KEY;
 
-router.get("/autocomplete", async (req, res) => {
-  const { input } = req.query;
-
-  console.log("\n========== OLA MAPS AUTOCOMPLETE ==========");
-  console.log("Time:", new Date().toISOString());
-  console.log("Input:", input);
-  console.log("API key loaded:", !!OLA_MAPS_API_KEY);
-
-  if (!input || input.trim().length < 1) {
-    console.log("❌ Empty input");
-    return res.json({ predictions: [] });
-  }
-
-  if (!OLA_MAPS_API_KEY) {
-    console.error("❌ OLA_MAPS_API_KEY is missing");
-    return res.status(500).json({
-      predictions: [],
-      error: {
-        message: "Ola Maps API key is not configured",
-      },
-    });
-  }
-
+router.post('/route', async (req, res) => {
   try {
-    const url = `https://api.olamaps.io/places/v1/autocomplete?input=${encodeURIComponent(
-      input
-    )}`;
+    const { origin, destination, waypoints } = req.query;
 
-    console.log("➡️ Calling Ola Maps API");
-    console.log("URL:", url);
-
-    const olaRes = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${OLA_MAPS_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-    });
-
-    console.log("Ola Status:", olaRes.status, olaRes.statusText);
-
-    const data = await olaRes.json();
-
-    console.log("Ola Response:", JSON.stringify(data, null, 2));
-
-    if (!olaRes.ok) {
-      console.error("❌ Ola Maps error:", data);
-
-      return res.status(olaRes.status).json({
-        predictions: [],
-        error: data,
+    if (!origin || !destination) {
+      return res.status(400).json({
+        success: false,
+        message: 'origin and destination are required',
       });
     }
 
-    console.log(
-      "✅ Autocomplete successful. Results:",
-      data?.predictions?.length || data?.results?.length || 0
+    if (!OLA_KEY) {
+      return res.status(500).json({
+        success: false,
+        message: 'OLA_MAPS_API_KEY is not configured',
+      });
+    }
+
+    const params = new URLSearchParams({
+      origin,
+      destination,
+      overview: 'full',
+      api_key: OLA_KEY,
+    });
+
+    if (waypoints) {
+      params.append('waypoints', waypoints);
+    }
+
+    const olaRes = await fetch(
+      `https://api.olamaps.io/routing/v1/directions?${params}`,
+      {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'X-Request-Id': Date.now().toString(),
+        },
+      }
     );
 
-    console.log("==========================================\n");
+    const data = await olaRes.json();
 
-    return res.json(data);
+    return res.status(olaRes.status).json(data);
   } catch (err) {
-    console.error("❌ Ola Maps autocomplete failed:", err);
+    console.error('OLA route error:', err);
 
     return res.status(500).json({
-      predictions: [],
-      error: "Autocomplete request failed",
+      success: false,
+      error: err.message,
     });
   }
 });

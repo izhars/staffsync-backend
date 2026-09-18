@@ -17,6 +17,8 @@ const {
   toggleLocationStatus,
   getMyLocations,
   checkLocation,
+  getAssignableUsers,
+  updateAssignees,
 } = require('../controllers/geoFenceController');
 
 // All routes below require authentication
@@ -27,6 +29,11 @@ router.use(protect);
 // ─────────────────────────────────────────────
 router.get('/my-locations', getMyLocations);
 router.post('/check', checkLocation);
+
+// ─────────────────────────────────────────────
+// Assignee picker data (HR only)
+// ─────────────────────────────────────────────
+router.get('/assignable-users', hrAdminAndAbove, getAssignableUsers);
 
 // ─────────────────────────────────────────────
 // Location collection
@@ -40,9 +47,6 @@ router
 
 // ─────────────────────────────────────────────
 // Single location
-//   GET    → manager and above (read-only)
-//   PUT    → HR admin and above
-//   DELETE → HR admin and above
 // ─────────────────────────────────────────────
 router
   .route('/locations/:id')
@@ -57,6 +61,15 @@ router.patch(
   '/locations/:id/toggle',
   hrAdminAndAbove,
   toggleLocationStatus
+);
+
+// ─────────────────────────────────────────────
+// Bulk update assignees for a location
+// ─────────────────────────────────────────────
+router.patch(
+  '/locations/:id/assignees',
+  hrAdminAndAbove,
+  updateAssignees
 );
 
 module.exports = router;

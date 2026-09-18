@@ -63,10 +63,21 @@ function distanceToPolylineMeters(pLat, pLon, points) {
 
 /**
  * Main entry — checks a coordinate against all active geo-fences
- * the user has access to. Returns:
+ * the user has access to.
+ *
+ * @param {number} latitude
+ * @param {number} longitude
+ * @param {string} userId
+ * @param {string} departmentId
+ * @param {number} gpsAccuracyMeters - device-reported accuracy radius,
+ *        added to the threshold so normal GPS jitter near a boundary
+ *        isn't wrongly rejected. Caller should cap this (e.g. 50m max)
+ *        before passing it in.
+ *
+ * Returns:
  *   { allowed, reason, matchedLocation, nearestLocation, allLocations, message }
  */
-async function isWithinAnyGeoFence(latitude, longitude, userId, departmentId) {
+async function isWithinAnyGeoFence(latitude, longitude, userId, departmentId, gpsAccuracyMeters = 0) {
   const locations = await GeoFenceLocation.find({ isActive: true }).lean();
 
   // Filter by department/employee access
@@ -91,26 +102,30 @@ async function isWithinAnyGeoFence(latitude, longitude, userId, departmentId) {
     };
   }
 
+  const safeAccuracy = Math.max(0, Math.min(gpsAccuracyMeters || 0, 50));
+
   const evaluated = accessible.map((loc) => {
     if (loc.shape === 'polyline') {
       const dist = distanceToPolylineMeters(latitude, longitude, loc.polylinePoints);
-      const threshold = loc.corridorWidthMeters || 100;
+      // Distance is measured from the centerline, so the allowed
+      // threshold is HALF the corridor width, not the full width.
+      const threshold = (loc.corridorWidthMeters || 100) / 2 + safeAccuracy;
       return {
         ...loc,
         distance: Math.round(dist),
         allowed: dist <= threshold,
-        threshold,
+        threshold: Math.round(threshold),
         shape: 'polyline',
       };
     }
     // circle
     const dist = haversineMeters(latitude, longitude, loc.latitude, loc.longitude);
-    const threshold = loc.radiusMeters || 100;
+    const threshold = (loc.radiusMeters || 100) + safeAccuracy;
     return {
       ...loc,
       distance: Math.round(dist),
       allowed: dist <= threshold,
-      threshold,
+      threshold: Math.round(threshold),
       shape: 'circle',
     };
   });

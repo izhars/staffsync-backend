@@ -7,13 +7,11 @@ const geoFenceLocationSchema = new mongoose.Schema({
     trim: true,
     unique: true,
   },
-  // NEW: 'polyline' added to enum
   type: {
     type: String,
     enum: ['office', 'site', 'warehouse', 'client', 'highway', 'polyline', 'other'],
     default: 'office',
   },
-  // NEW: shape determines how geo-fence is validated
   shape: {
     type: String,
     enum: ['circle', 'polyline'],
@@ -24,8 +22,6 @@ const geoFenceLocationSchema = new mongoose.Schema({
     required: [true, 'Address is required'],
     trim: true,
   },
-
-  // ── Circle fields (optional when shape = polyline) ─────────────
   latitude: {
     type: Number,
     min: -90,
@@ -42,22 +38,22 @@ const geoFenceLocationSchema = new mongoose.Schema({
     min: 10,
     max: 5000,
   },
-
-  // ── Polyline fields (optional when shape = circle) ─────────────
-  // Array of { latitude, longitude } points defining the route/path
   polylinePoints: [{
     latitude: { type: Number, required: true, min: -90, max: 90 },
     longitude: { type: Number, required: true, min: -180, max: 180 },
     label: { type: String, trim: true }, // optional: "KM 12", "Toll Plaza"
   }],
-  // Corridor width in meters — how far from the line an employee can be
   corridorWidthMeters: {
     type: Number,
     default: 100,
     min: 10,
     max: 2000,
   },
-
+  waypoints: [{
+    latitude: { type: Number, required: true, min: -90, max: 90 },
+    longitude: { type: Number, required: true, min: -180, max: 180 },
+    label: { type: String, trim: true },
+  }],
   isActive: {
     type: Boolean,
     default: true,

@@ -60,6 +60,7 @@ const numberPlateRoutes = require('./routes/numberPlateRoutes');
 const geoFenceRoutes = require('./routes/geoFence');
 const geocodeRoutes = require("./routes/geocode");
 const faceRoutes = require('./routes/faceRoutes');
+const githubRoutes = require('./routes/githubRoutes');
 
 // Initialize Express app
 const app = express();
@@ -173,6 +174,7 @@ app.use('/api/plate', numberPlateRoutes);
 app.use('/api/geo-fence', geoFenceRoutes);
 app.use("/api/geocode", geocodeRoutes); // Geocode routes
 app.use('/api/face', faceRoutes);
+app.use('/api/github', githubRoutes);
 
 // Add a debug endpoint
 app.get('/api/debug/socket-status', (req, res) => {

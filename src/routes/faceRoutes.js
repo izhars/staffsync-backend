@@ -8,13 +8,12 @@ const {
 } = require('../middleware/auth');
 
 const {
-  // Employee self-service
   registerFace,
   getFaceStatus,
   verifyFace,
   deleteFace,
   compareEmbeddings,
-  // Admin/HR
+  deleteOwnFace, 
   listEnrollments,
   getEnrollmentByEmployee,
   adminEnrollFace,
@@ -35,8 +34,7 @@ router.use(protect);
 router.post('/register', registerFace);
 router.post('/verify', verifyFace);
 router.get('/status', getFaceStatus);
-router.delete('/enrollments', deleteFace);
-
+router.delete('/enrollments', deleteOwnFace);
 // ─────────────────────────────────────────────
 // Debug / utility (any authenticated user)
 // ─────────────────────────────────────────────

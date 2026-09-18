@@ -1,8 +1,3 @@
-// constants/roles.js
-// Single source of truth for Access Roles across the HRMS.
-// Department and Designation are SEPARATE concepts and must never be
-// encoded into this file.
-
 const ACCESS_ROLES = {
   SUPER_ADMIN: 'superadmin',
   HR_ADMIN:    'hr_admin',
@@ -52,6 +47,25 @@ const NON_ADMIN_ROLES = [
 // Roles that should NOT carry personal / salary / bank info.
 const ADMIN_ROLES = [ACCESS_ROLES.SUPER_ADMIN, ACCESS_ROLES.HR_ADMIN];
 
+const hasRankAtLeast = (role, minRole) => {
+  const userRank = ROLE_RANK[role] ?? -1;
+  const minRank  = ROLE_RANK[minRole] ?? Infinity;
+  return userRank >= minRank;
+};
+
+/** Convenience predicates */
+const isSuperAdmin = (role) => role === ACCESS_ROLES.SUPER_ADMIN;
+const isHrAdmin    = (role) => role === ACCESS_ROLES.HR_ADMIN;
+const isManager    = (role) => role === ACCESS_ROLES.MANAGER;
+const isTeamLead   = (role) => role === ACCESS_ROLES.TEAM_LEAD;
+const isEmployee   = (role) => role === ACCESS_ROLES.EMPLOYEE;
+
+/** HR admin or above (superadmin + hr_admin) */
+const isHrAdminOrAbove = (role) => hasRankAtLeast(role, ACCESS_ROLES.HR_ADMIN);
+
+/** Manager or above */
+const isManagerOrAbove = (role) => hasRankAtLeast(role, ACCESS_ROLES.MANAGER);
+
 module.exports = {
   ACCESS_ROLES,
   ROLE_CREATION_MATRIX,
@@ -59,4 +73,12 @@ module.exports = {
   ROLE_LABELS,
   NON_ADMIN_ROLES,
   ADMIN_ROLES,
+  hasRankAtLeast,
+  isSuperAdmin,
+  isHrAdmin,
+  isManager,
+  isTeamLead,
+  isEmployee,
+  isHrAdminOrAbove,
+  isManagerOrAbove,
 };

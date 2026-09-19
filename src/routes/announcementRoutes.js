@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
+const { ACCESS_ROLES } = require('../constants/roles');
 const {
   getAllAnnouncements,
   getAnnouncement,
@@ -13,11 +14,11 @@ router.use(protect);
 
 router.route('/')
   .get(getAllAnnouncements)
-  .post(authorize('hr', 'superadmin'), createAnnouncement);
+  .post(authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), createAnnouncement);
 
 router.route('/:id')
   .get(getAnnouncement)
-  .put(authorize('hr', 'superadmin'), updateAnnouncement)
-  .delete(authorize('hr', 'superadmin'), deleteAnnouncement);
+  .put(authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), updateAnnouncement)
+  .delete(authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), deleteAnnouncement);
 
 module.exports = router;

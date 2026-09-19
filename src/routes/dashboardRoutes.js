@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
+const { ACCESS_ROLES } = require('../constants/roles');
 const {
   getDashboardStats,
   getAttendanceOverview,
@@ -16,12 +17,12 @@ router.use(protect);
 router.get('/stats', getDashboardStats);
 
 // Restricted routes
-router.get('/attendance-overview', authorize('hr', 'manager', 'superadmin'), getAttendanceOverview);
-router.get('/leave-overview', authorize('hr', 'manager', 'superadmin'), getLeaveOverview);
-router.get('/employee-growth', authorize('hr', 'superadmin'), getEmployeeGrowth);
+router.get('/attendance-overview', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.MANAGER, ACCESS_ROLES.SUPER_ADMIN), getAttendanceOverview);
+router.get('/leave-overview', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.MANAGER, ACCESS_ROLES.SUPER_ADMIN), getLeaveOverview);
+router.get('/employee-growth', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), getEmployeeGrowth);
 
 // Employee CRUD
-router.get('/employees', authorize('hr', 'superadmin'), getAllEmployees);
-router.get('/employees/:id', authorize('hr', 'superadmin'), getEmployeeById);
+router.get('/employees', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), getAllEmployees);
+router.get('/employees/:id', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), getEmployeeById);
 
 module.exports = router;

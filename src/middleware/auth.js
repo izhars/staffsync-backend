@@ -4,6 +4,19 @@ const User = require('../models/User');
 const Token = require('../models/Token');
 const { ACCESS_ROLES, ROLE_RANK } = require('../constants/roles');
 
+const normalizeRoleName = (role) => {
+  const roleName = String(role || '').trim().toLowerCase();
+  const legacyAliases = {
+    admin: ACCESS_ROLES.HR_ADMIN,
+    hr: ACCESS_ROLES.HR_ADMIN,
+    superadmin: ACCESS_ROLES.SUPER_ADMIN,
+    teamlead: ACCESS_ROLES.TEAM_LEAD,
+    team_lead: ACCESS_ROLES.TEAM_LEAD,
+  };
+
+  return legacyAliases[roleName] || roleName;
+};
+
 exports.protect = async (req, res, next) => {
   let token;
 
@@ -59,11 +72,15 @@ exports.protect = async (req, res, next) => {
 
 // 🧩 Role Authorization
 exports.authorize = (...roles) => {
+  const allowedRoles = roles.map(normalizeRoleName);
+
   return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
+    const userRole = normalizeRoleName(req.user?.role);
+
+    if (!allowedRoles.includes(userRole)) {
       return res.status(403).json({
         success: false,
-        message: `User role '${req.user.role}' is not authorized to access this route`,
+        message: `User role '${req.user?.role || 'unknown'}' is not authorized to access this route`,
       });
     }
     next();

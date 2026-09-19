@@ -3,9 +3,10 @@ const express = require('express');
 const router = express.Router();
 const emailService = require('../utils/emailService');
 const { protect, authorize } = require('../middleware/auth');
+const { ACCESS_ROLES } = require('../constants/roles');
 
 // Verify email configuration (Admin only)
-router.get('/verify', protect, authorize('admin'), async (req, res) => {
+router.get('/verify', protect, authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     await emailService.verifyEmailConfig();
     res.json({
@@ -21,7 +22,7 @@ router.get('/verify', protect, authorize('admin'), async (req, res) => {
 });
 
 // Get email service stats (Admin only)
-router.get('/stats', protect, authorize('admin'), async (req, res) => {
+router.get('/stats', protect, authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const stats = await emailService.getEmailStats();
     res.json({
@@ -37,7 +38,7 @@ router.get('/stats', protect, authorize('admin'), async (req, res) => {
 });
 
 // Send test email (Admin/HR only)
-router.post('/test', protect, authorize('admin', 'hr'), async (req, res) => {
+router.post('/test', protect, authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { email } = req.body;
 
@@ -66,7 +67,7 @@ router.post('/test', protect, authorize('admin', 'hr'), async (req, res) => {
 });
 
 // Send announcement email (Admin/HR only)
-router.post('/announcement', protect, authorize('admin', 'hr'), async (req, res) => {
+router.post('/announcement', protect, authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { recipients, title, message, priority } = req.body;
 
@@ -105,7 +106,7 @@ router.post('/announcement', protect, authorize('admin', 'hr'), async (req, res)
 });
 
 // Send bulk email (Admin only)
-router.post('/bulk', protect, authorize('admin'), async (req, res) => {
+router.post('/bulk', protect, authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { emails, subject, html, options } = req.body;
 
@@ -138,7 +139,7 @@ router.post('/bulk', protect, authorize('admin'), async (req, res) => {
 });
 
 // Clear template cache (Admin only)
-router.post('/clear-cache', protect, authorize('admin'), async (req, res) => {
+router.post('/clear-cache', protect, authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     emailService.clearTemplateCache();
     res.json({
@@ -154,7 +155,7 @@ router.post('/clear-cache', protect, authorize('admin'), async (req, res) => {
 });
 
 // Send custom email (Admin/HR only)
-router.post('/send', protect, authorize('admin', 'hr'), async (req, res) => {
+router.post('/send', protect, authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { to, subject, html, text, attachments } = req.body;
 

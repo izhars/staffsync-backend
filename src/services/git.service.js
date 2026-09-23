@@ -64,8 +64,6 @@ async function pushToGithub(message = '') {
       await git.checkoutLocalBranch(BRANCH);
       await git.addRemote('origin', getAuthUrl());
 
-      // Try to reclaim existing remote history as our base, so a lost
-      // local .git dir doesn't force-overwrite prior commits on GitHub.
       try {
         await git.fetch('origin', BRANCH);
         await git.reset(['--soft', `origin/${BRANCH}`]);
@@ -73,12 +71,20 @@ async function pushToGithub(message = '') {
         console.warn(`⚠️ No existing remote branch "${BRANCH}" found — starting fresh history.`);
       }
     } else {
-      // Ensure remote always carries a fresh token
+      // Update URL WITHOUT dropping remote-tracking refs
       const remotes = await git.getRemotes(true);
       if (remotes.some(r => r.name === 'origin')) {
-        await git.removeRemote('origin').catch(() => {});
+        await git.remote(['set-url', 'origin', getAuthUrl()]);
+      } else {
+        await git.addRemote('origin', getAuthUrl());
       }
-      await git.addRemote('origin', getAuthUrl());
+
+      // Refresh tracking refs so --force-with-lease has something valid to lease against
+      try {
+        await git.fetch('origin', BRANCH);
+      } catch {
+        console.warn(`⚠️ Fetch failed for "${BRANCH}" — remote branch may not exist yet.`);
+      }
     }
 
     await git.add('.');
@@ -86,10 +92,19 @@ async function pushToGithub(message = '') {
     try {
       await git.commit(message || `Auto push ${new Date().toISOString()}`);
     } catch {
-      // nothing to commit — fine, proceed to push
+      // nothing to commit
     }
 
-    const pushResult = await git.push('origin', BRANCH, ['--force-with-lease']);
+    // Use explicit lease form — works even without a configured upstream
+    let leaseArg = '--force-with-lease';
+    try {
+      const remoteSha = (await git.revparse([`origin/${BRANCH}`])).trim();
+      leaseArg = `--force-with-lease=${BRANCH}:${remoteSha}`;
+    } catch {
+      // No remote ref yet (first push) — plain force-with-lease is fine
+    }
+
+    const pushResult = await git.push('origin', BRANCH, [leaseArg]);
 
     return {
       branch: BRANCH,

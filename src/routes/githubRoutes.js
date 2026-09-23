@@ -5,7 +5,7 @@ const router = express.Router();
 const { pushCode, getStatus } = require('../controllers/githubController');
 const { protect, superAdminOnly } = require('../middleware/auth');
 
-// 🔐 Sirf Super Admin hi push kar sakta hai
+// 🔐 Only Super Admin can push/view GitHub deployment status
 router.use(protect);
 router.use(superAdminOnly);
 

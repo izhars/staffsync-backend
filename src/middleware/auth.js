@@ -17,6 +17,9 @@ const normalizeRoleName = (role) => {
   return legacyAliases[roleName] || roleName;
 };
 
+// ────────────────────────────────────────────────────────────────
+// PROTECT: verify JWT + verify active session (single-device policy)
+// ────────────────────────────────────────────────────────────────
 exports.protect = async (req, res, next) => {
   let token;
 
@@ -33,14 +36,38 @@ exports.protect = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    console.log('🔵 PROTECT - decoded.sessionId:', decoded.sessionId);
     const user = await User.findById(decoded.id).select('-password');
+    console.log('🔵 PROTECT - user.currentSessionId in DB:', user.currentSessionId);
 
     if (!user) {
       return res.status(401).json({ success: false, message: 'User not found' });
     }
 
+    if (!user.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: 'Account is deactivated. Please contact HR.',
+      });
+    }
+
+    // ── SINGLE-SESSION CHECK ────────────────────────────────────
+    // If this JWT carries a sessionId, it must match the user's
+    // currently active session. Mismatch = this device was kicked
+    // (either by a newer login or by an HR device reset).
+    // Legacy tokens (issued before this feature) have no sessionId
+    // and are allowed through for backward compatibility.
+    if (decoded.sessionId && user.currentSessionId !== decoded.sessionId) {
+      return res.status(401).json({
+        success: false,
+        code: 'SESSION_REPLACED',
+        message:
+          'You have been logged out because your account was accessed from another device or your device was reset by HR.',
+      });
+    }
+
     // Save/Update token
-    const issuedAt  = new Date(decoded.iat * 1000);
+    const issuedAt = new Date(decoded.iat * 1000);
     const expiresAt = new Date(decoded.exp * 1000);
 
     let tokenType = 'employee';
@@ -60,8 +87,18 @@ exports.protect = async (req, res, next) => {
     );
 
     req.user = user;
+    req.sessionId = decoded.sessionId || null;   // ← expose for logout
     next();
   } catch (error) {
+    // Give the client a distinct code for expired tokens
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        success: false,
+        code: 'TOKEN_EXPIRED',
+        message: 'Session expired. Please log in again.',
+      });
+    }
+
     console.error('❌ JWT verification failed:', error.message);
     return res.status(401).json({
       success: false,
@@ -88,11 +125,11 @@ exports.authorize = (...roles) => {
 };
 
 // 🔐 Predefined Role Groups
-exports.superAdminOnly  = exports.authorize(ACCESS_ROLES.SUPER_ADMIN);
+exports.superAdminOnly = exports.authorize(ACCESS_ROLES.SUPER_ADMIN);
 exports.hrAdminAndAbove = exports.authorize(ACCESS_ROLES.SUPER_ADMIN, ACCESS_ROLES.HR_ADMIN);
 
 // Backwards-compatible alias (old routes used `hrAndAbove`)
-exports.hrAndAbove      = exports.hrAdminAndAbove;
+exports.hrAndAbove = exports.hrAdminAndAbove;
 
 exports.managerAndAbove = exports.authorize(
   ACCESS_ROLES.SUPER_ADMIN,
@@ -109,7 +146,7 @@ exports.teamLeadAndAbove = exports.authorize(
 
 // Rank-based guard — "at least this role"
 exports.minRole = (minRole) => (req, res, next) => {
-  const userRank     = ROLE_RANK[req.user.role] ?? 0;
+  const userRank = ROLE_RANK[req.user.role] ?? 0;
   const requiredRank = ROLE_RANK[minRole] ?? 0;
   if (userRank < requiredRank) {
     return res.status(403).json({ success: false, message: 'Insufficient privileges' });

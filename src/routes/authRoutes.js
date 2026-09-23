@@ -6,6 +6,7 @@ const { profileUpload } = require('../middleware/upload');
 const {
   register,
   login,
+  logout,
   getMe,
   updateProfile,
   changePassword,
@@ -38,6 +39,7 @@ router.patch('/assign-manager/:userId', protect, hrAndAbove, assignManager);
 // ── Authenticated user routes ───────────────────────────────────
 router.use(protect);
 
+router.post('/logout', logout);    // ← ADD THIS LINE
 router.get('/me', getMe);
 router.put('/profile', updateProfile);
 router.put('/change-password', changePassword);

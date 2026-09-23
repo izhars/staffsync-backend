@@ -661,269 +661,12 @@ function computeWorkHours(checkInTime, checkOutTime) {
 // @access  Private
 exports.getMyAttendance = async (req, res) => {
   try {
-    const { startDate, endDate, month, year, employeeId: queryEmployeeId } = req.query;
+    const { startDate, endDate, month, year } = req.query;
 
     const employeeId = req.user.id;
 
-    const user = await User.findById(employeeId)
-      .select("weekendType dateOfJoining");
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "Employee not found",
-      });
-    }
-
-    const weekendType = user.weekendType || "sunday";
-    const doj = moment(user.dateOfJoining).tz("Asia/Kolkata").startOf("day");
-
-    let start, end;
-
-    if (startDate && endDate) {
-      start = moment.tz(startDate, "Asia/Kolkata").startOf("day");
-      end = moment.tz(endDate, "Asia/Kolkata").endOf("day");
-    } else if (month && year) {
-      start = moment.tz({ year, month: month - 1, day: 1 }, "Asia/Kolkata").startOf("day");
-      end = moment(start).endOf("month");
-    } else {
-      start = moment.tz("Asia/Kolkata").startOf("month");
-      end = moment(start).endOf("month");
-    }
-
-    start = moment.max(start, doj);
-
-    const startUTC = start.clone().utc().toDate();
-    const endUTC = end.clone().utc().toDate();
-
-    const [attendance, holidays, comboOffs, leaves] = await Promise.all([
-      Attendance.find({
-        employee: employeeId,
-        date: { $gte: startUTC, $lte: endUTC },
-      }).sort({ date: -1 }).lean(),
-
-      Holiday.find({
-        date: { $gte: startUTC, $lte: endUTC },
-        isActive: true,
-      }).lean(),
-
-      ComboOff.find({
-        employee: employeeId,
-        date: { $gte: startUTC, $lte: endUTC },
-        status: { $in: ["approved", "used", "earned"] },
-      }).lean(),
-
-      Leave.find({
-        employee: employeeId,
-        fromDate: { $lte: endUTC },
-        toDate: { $gte: startUTC },
-        status: "approved",
-      }).lean(),
-    ]);
-
-    const holidayMap = new Map(
-      holidays.map(h => [
-        moment(h.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
-        { name: h.name, type: h.type, category: h.category },
-      ])
-    );
-
-    const attendanceMap = new Map(
-      attendance.map(a => [
-        moment(a.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
-        a,
-      ])
-    );
-
-    const comboOffMap = new Map(
-      comboOffs.map(c => [
-        moment(c.date).tz("Asia/Kolkata").format("YYYY-MM-DD"),
-        c,
-      ])
-    );
-
-    const leaveMap = new Map();
-    leaves.forEach(l => {
-      let d = moment(l.fromDate).tz("Asia/Kolkata").startOf("day");
-      const last = moment(l.toDate).tz("Asia/Kolkata").startOf("day");
-      while (d.isSameOrBefore(last, "day")) {
-        leaveMap.set(d.format("YYYY-MM-DD"), l);
-        d.add(1, "day");
-      }
-    });
-
-    const today = moment.tz("Asia/Kolkata").startOf("day");
-    const totalDays = [];
-    let current = start.clone();
-
-    while (current.isSameOrBefore(end, "day") && current.isSameOrBefore(today, "day")) {
-      const dateKey = current.format("YYYY-MM-DD");
-      const day = getISTDay(current);
-
-      const record = attendanceMap.get(dateKey);
-      const holiday = holidayMap.get(dateKey);
-      const comboOff = comboOffMap.get(dateKey);
-      const leave = leaveMap.get(dateKey);
-
-      let isWeekend = false;
-      if (weekendType === "sunday") {
-        isWeekend = day === 0;
-      } else if (weekendType === "saturday_sunday") {
-        isWeekend = day === 0 || day === 6;
-      }
-
-      // Priority: Combo-off → Leave → Attendance → Holiday → Weekend → Absent
-
-      if (comboOff) {
-        totalDays.push({
-          date: dateKey,
-          status: "combo-off",
-          comboOffStatus: comboOff.status,
-          remarks: comboOff.remarks || null,
-          approvedBy: comboOff.approvedBy || null,
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      } else if (leave) {
-        totalDays.push({
-          date: dateKey,
-          status: "on-leave",
-          leaveType: leave.type || leave.leaveType,
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      } else if (record) {
-        // ✅ Real punch wins over holiday/weekend
-        const isToday = current.isSame(today, "day");
-
-        let workHours = record.workHours || 0;
-        if (isToday) {
-          workHours = getCurrentWorkHours(record);
-        } else if (record.checkIn?.time && record.checkOut?.time) {
-          workHours = computeWorkHours(record.checkIn.time, record.checkOut.time);
-        }
-
-        const missedCheckout =
-          !isToday && !!record.checkIn?.time && !record.checkOut?.time;
-
-        const {
-          _id, employee, createdAt, updatedAt, __v,
-          ...cleanRecord
-        } = record;
-
-        totalDays.push({
-          ...cleanRecord,
-          date: dateKey,
-          status: record.status || "present",
-          workHours,
-          missedCheckout,
-
-          // Keep holiday/weekend context for UI badges
-          holidayName: holiday?.name || null,
-          holidayType: holiday?.type || null,
-          isRestrictedHoliday: holiday?.category === "Restricted",
-          isWeeklyOffWork: isWeekend || false,
-
-          checkInTimeFormatted: record.checkIn?.time
-            ? formatISTTime(record.checkIn.time)
-            : null,
-          checkOutTimeFormatted: record.checkOut?.time
-            ? formatISTTime(record.checkOut.time)
-            : null,
-        });
-      } else if (holiday) {
-        totalDays.push({
-          date: dateKey,
-          status: "holiday",
-          holidayName: holiday.name,
-          holidayType: holiday.type,
-          holidayCategory: holiday.category,
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      } else if (isWeekend) {
-        totalDays.push({
-          date: dateKey,
-          status: "weekly-off",
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      } else {
-        totalDays.push({
-          date: dateKey,
-          status: "absent",
-          workHours: 0,
-          checkIn: { time: null },
-          checkOut: { time: null },
-          isLate: false,
-        });
-      }
-
-      current.add(1, "day");
-    }
-
-    const stats = {
-      totalDays: totalDays.length,
-      present: totalDays.filter(a => a.status === "present").length,
-      absent: totalDays.filter(a => a.status === "absent").length,
-      halfDay: totalDays.filter(a => a.status === "half-day").length,
-      onLeave: totalDays.filter(a => a.status === "on-leave").length,
-      holiday: totalDays.filter(a => a.status === "holiday").length,
-      weeklyOff: totalDays.filter(a => a.status === "weekly-off").length,
-      comboOff: totalDays.filter(a => a.status === "combo-off").length,
-
-      totalWorkHours: Number(
-        totalDays.reduce((s, a) => s + (a.workHours || 0), 0).toFixed(2)
-      ),
-      lateCount: totalDays.filter(a => a.isLate).length,
-
-      workedOnHoliday: totalDays.filter(
-        a => a.status === "present" && a.holidayName
-      ).length,
-      workedOnWeeklyOff: totalDays.filter(
-        a => a.status === "present" && a.isWeeklyOffWork
-      ).length,
-      missedCheckouts: totalDays.filter(a => a.missedCheckout).length,
-    };
-
-    res.status(200).json({
-      success: true,
-      count: totalDays.length,
-      stats,
-      attendance: totalDays,
-    });
-
-  } catch (error) {
-    console.error("Attendance fetch error:", error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-
-exports.getEmployeeAttendancWithCalender = async (req, res) => {
-  try {
-    const { startDate, endDate, month, year } = req.query;
-
-    // ✅ ONLY DIFFERENCE: employee comes from params/query, not req.user
-    const employeeId = req.params.employeeId || req.query.employeeId;
-
-    if (!employeeId) {
-      return res.status(400).json({
-        success: false,
-        message: 'employeeId is required',
-      });
-    }
-
     const user = await User.findById(employeeId).select(
-      'name email employeeId department designation weekendType dateOfJoining'
+      'weekendType dateOfJoining createdAt'
     );
 
     if (!user) {
@@ -934,7 +677,34 @@ exports.getEmployeeAttendancWithCalender = async (req, res) => {
     }
 
     const weekendType = user.weekendType || 'sunday';
-    const doj = moment(user.dateOfJoining).tz('Asia/Kolkata').startOf('day');
+
+    // ── Same DOJ-safe logic as HR version ─────────────────────────────
+    const dojFromProfile = user.dateOfJoining
+      ? moment(user.dateOfJoining).tz('Asia/Kolkata').startOf('day')
+      : null;
+
+    const firstRealPunch = await Attendance.findOne({
+      employee: employeeId,
+      'checkIn.time': { $ne: null },
+    })
+      .sort({ date: 1 })
+      .select('date')
+      .lean();
+
+    const firstPunchMoment = firstRealPunch
+      ? moment(firstRealPunch.date).tz('Asia/Kolkata').startOf('day')
+      : null;
+
+    let doj;
+    if (dojFromProfile && firstPunchMoment) {
+      doj = moment.max(dojFromProfile, firstPunchMoment);
+    } else if (dojFromProfile) {
+      doj = dojFromProfile;
+    } else if (firstPunchMoment) {
+      doj = firstPunchMoment;
+    } else {
+      doj = moment.tz('Asia/Kolkata').startOf('day');
+    }
 
     let start, end;
 
@@ -943,7 +713,7 @@ exports.getEmployeeAttendancWithCalender = async (req, res) => {
       end = moment.tz(endDate, 'Asia/Kolkata').endOf('day');
     } else if (month && year) {
       start = moment
-        .tz({ year, month: month - 1, day: 1 }, 'Asia/Kolkata')
+        .tz({ year: +year, month: +month - 1, day: 1 }, 'Asia/Kolkata')
         .startOf('day');
       end = moment(start).endOf('month');
     } else {
@@ -952,6 +722,29 @@ exports.getEmployeeAttendancWithCalender = async (req, res) => {
     }
 
     start = moment.max(start, doj);
+
+    if (start.isAfter(end, 'day')) {
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        stats: {
+          totalDays: 0,
+          present: 0,
+          absent: 0,
+          halfDay: 0,
+          onLeave: 0,
+          holiday: 0,
+          weeklyOff: 0,
+          comboOff: 0,
+          totalWorkHours: 0,
+          lateCount: 0,
+          workedOnHoliday: 0,
+          workedOnWeeklyOff: 0,
+          missedCheckouts: 0,
+        },
+        attendance: [],
+      });
+    }
 
     const startUTC = start.clone().utc().toDate();
     const endUTC = end.clone().utc().toDate();
@@ -984,28 +777,28 @@ exports.getEmployeeAttendancWithCalender = async (req, res) => {
     ]);
 
     const holidayMap = new Map(
-      holidays.map(h => [
+      holidays.map((h) => [
         moment(h.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
         { name: h.name, type: h.type, category: h.category },
       ])
     );
 
     const attendanceMap = new Map(
-      attendance.map(a => [
+      attendance.map((a) => [
         moment(a.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
         a,
       ])
     );
 
     const comboOffMap = new Map(
-      comboOffs.map(c => [
+      comboOffs.map((c) => [
         moment(c.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
         c,
       ])
     );
 
     const leaveMap = new Map();
-    leaves.forEach(l => {
+    leaves.forEach((l) => {
       let d = moment(l.fromDate).tz('Asia/Kolkata').startOf('day');
       const last = moment(l.toDate).tz('Asia/Kolkata').startOf('day');
       while (d.isSameOrBefore(last, 'day')) {
@@ -1022,6 +815,11 @@ exports.getEmployeeAttendancWithCalender = async (req, res) => {
       current.isSameOrBefore(end, 'day') &&
       current.isSameOrBefore(today, 'day')
     ) {
+      if (current.isBefore(doj, 'day')) {
+        current.add(1, 'day');
+        continue;
+      }
+
       const dateKey = current.format('YYYY-MM-DD');
       const day = getISTDay(current);
 
@@ -1037,7 +835,8 @@ exports.getEmployeeAttendancWithCalender = async (req, res) => {
         isWeekend = day === 0 || day === 6;
       }
 
-      // Priority: Combo-off → Leave → Attendance → Holiday → Weekend → Absent
+      const hasRealPunch = !!(record && record.checkIn?.time);
+
       if (comboOff) {
         totalDays.push({
           date: dateKey,
@@ -1060,7 +859,7 @@ exports.getEmployeeAttendancWithCalender = async (req, res) => {
           checkOut: { time: null },
           isLate: false,
         });
-      } else if (record) {
+      } else if (hasRealPunch) {
         const isToday = current.isSame(today, 'day');
 
         let workHours = record.workHours || 0;
@@ -1139,26 +938,395 @@ exports.getEmployeeAttendancWithCalender = async (req, res) => {
 
     const stats = {
       totalDays: totalDays.length,
-      present: totalDays.filter(a => a.status === 'present').length,
-      absent: totalDays.filter(a => a.status === 'absent').length,
-      halfDay: totalDays.filter(a => a.status === 'half-day').length,
-      onLeave: totalDays.filter(a => a.status === 'on-leave').length,
-      holiday: totalDays.filter(a => a.status === 'holiday').length,
-      weeklyOff: totalDays.filter(a => a.status === 'weekly-off').length,
-      comboOff: totalDays.filter(a => a.status === 'combo-off').length,
+      present: totalDays.filter((a) => a.status === 'present').length,
+      absent: totalDays.filter((a) => a.status === 'absent').length,
+      halfDay: totalDays.filter((a) => a.status === 'half-day').length,
+      onLeave: totalDays.filter((a) => a.status === 'on-leave').length,
+      holiday: totalDays.filter((a) => a.status === 'holiday').length,
+      weeklyOff: totalDays.filter((a) => a.status === 'weekly-off').length,
+      comboOff: totalDays.filter((a) => a.status === 'combo-off').length,
 
       totalWorkHours: Number(
         totalDays.reduce((s, a) => s + (a.workHours || 0), 0).toFixed(2)
       ),
-      lateCount: totalDays.filter(a => a.isLate).length,
+      lateCount: totalDays.filter((a) => a.isLate).length,
 
       workedOnHoliday: totalDays.filter(
-        a => a.status === 'present' && a.holidayName
+        (a) => a.status === 'present' && a.holidayName
       ).length,
       workedOnWeeklyOff: totalDays.filter(
-        a => a.status === 'present' && a.isWeeklyOffWork
+        (a) => a.status === 'present' && a.isWeeklyOffWork
       ).length,
-      missedCheckouts: totalDays.filter(a => a.missedCheckout).length,
+      missedCheckouts: totalDays.filter((a) => a.missedCheckout).length,
+    };
+
+    res.status(200).json({
+      success: true,
+      count: totalDays.length,
+      stats,
+      attendance: totalDays,
+    });
+  } catch (error) {
+    console.error('Attendance fetch error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+exports.getEmployeeAttendancWithCalender = async (req, res) => {
+  try {
+    const { startDate, endDate, month, year } = req.query;
+
+    const employeeId = req.params.employeeId || req.query.employeeId;
+
+    if (!employeeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'employeeId is required',
+      });
+    }
+
+    const user = await User.findById(employeeId).select(
+      'name email employeeId department designation weekendType dateOfJoining createdAt'
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Employee not found',
+      });
+    }
+
+    const weekendType = user.weekendType || 'sunday';
+    const dojFromProfile = user.dateOfJoining
+      ? moment(user.dateOfJoining).tz('Asia/Kolkata').startOf('day')
+      : null;
+
+    const firstRealPunch = await Attendance.findOne({
+      employee: employeeId,
+      'checkIn.time': { $ne: null },
+    })
+      .sort({ date: 1 })
+      .select('date')
+      .lean();
+
+    const firstPunchMoment = firstRealPunch
+      ? moment(firstRealPunch.date).tz('Asia/Kolkata').startOf('day')
+      : null;
+
+    let doj;
+    if (dojFromProfile && firstPunchMoment) {
+      doj = moment.max(dojFromProfile, firstPunchMoment);
+    } else if (dojFromProfile) {
+      doj = dojFromProfile;
+    } else if (firstPunchMoment) {
+      doj = firstPunchMoment;
+    } else {
+      doj = moment.tz('Asia/Kolkata').startOf('day');
+    }
+
+    let start, end;
+
+    if (startDate && endDate) {
+      start = moment.tz(startDate, 'Asia/Kolkata').startOf('day');
+      end = moment.tz(endDate, 'Asia/Kolkata').endOf('day');
+    } else if (month && year) {
+      start = moment
+        .tz({ year: +year, month: +month - 1, day: 1 }, 'Asia/Kolkata')
+        .startOf('day');
+      end = moment(start).endOf('month');
+    } else {
+      start = moment.tz('Asia/Kolkata').startOf('month');
+      end = moment(start).endOf('month');
+    }
+
+    if (start.isAfter(end, 'day')) {
+      return res.status(200).json({
+        success: true,
+        employee: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          employeeId: user.employeeId,
+          department: user.department,
+          designation: user.designation,
+        },
+        count: 0,
+        stats: {
+          totalDays: 0,
+          present: 0,
+          absent: 0,
+          halfDay: 0,
+          onLeave: 0,
+          holiday: 0,
+          weeklyOff: 0,
+          comboOff: 0,
+          totalWorkHours: 0,
+          lateCount: 0,
+          workedOnHoliday: 0,
+          workedOnWeeklyOff: 0,
+          missedCheckouts: 0,
+        },
+        attendance: [],
+      });
+    }
+
+    const startUTC = start.clone().utc().toDate();
+    const endUTC = end.clone().utc().toDate();
+
+    const [attendance, holidays, comboOffs, leaves] = await Promise.all([
+      Attendance.find({
+        employee: employeeId,
+        date: { $gte: startUTC, $lte: endUTC },
+      })
+        .sort({ date: -1 })
+        .lean(),
+
+      Holiday.find({
+        date: { $gte: startUTC, $lte: endUTC },
+        isActive: true,
+      })
+        .select('name date type category description maxAllowed image')
+        .lean(),
+
+      ComboOff.find({
+        employee: employeeId,
+        date: { $gte: startUTC, $lte: endUTC },
+        status: { $in: ['approved', 'used', 'earned'] },
+      }).lean(),
+
+      Leave.find({
+        employee: employeeId,
+        fromDate: { $lte: endUTC },
+        toDate: { $gte: startUTC },
+        status: 'approved',
+      }).lean(),
+    ]);
+
+    const holidayMap = new Map(
+      holidays.map((h) => [
+        moment(h.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        {
+          name: h.name,
+          type: h.type,
+          category: h.category,
+          description: h.description,
+          maxAllowed: h.maxAllowed,
+          image: h.image,   // ← was missing
+        },
+      ])
+    );
+
+    const attendanceMap = new Map(
+      attendance.map((a) => [
+        moment(a.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        a,
+      ])
+    );
+
+    const comboOffMap = new Map(
+      comboOffs.map((c) => [
+        moment(c.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        c,
+      ])
+    );
+
+    const leaveMap = new Map();
+    leaves.forEach((l) => {
+      let d = moment(l.fromDate).tz('Asia/Kolkata').startOf('day');
+      const last = moment(l.toDate).tz('Asia/Kolkata').startOf('day');
+      while (d.isSameOrBefore(last, 'day')) {
+        leaveMap.set(d.format('YYYY-MM-DD'), l);
+        d.add(1, 'day');
+      }
+    });
+
+    const today = moment.tz('Asia/Kolkata').startOf('day');
+    const totalDays = [];
+    let current = start.clone();
+
+    while (
+      current.isSameOrBefore(end, 'day') &&
+      current.isSameOrBefore(today, 'day')
+    ) {
+      const dateKey = current.format('YYYY-MM-DD');
+      const day = getISTDay(current);
+
+      const record = attendanceMap.get(dateKey);
+      const holiday = holidayMap.get(dateKey);
+      const comboOff = comboOffMap.get(dateKey);
+      const leave = leaveMap.get(dateKey);
+
+      const isPreDoj = current.isBefore(doj, 'day');
+
+      // Skip days before DOJ, EXCEPT holidays (so pre-DOJ holidays are visible)
+      if (isPreDoj && !holiday) {
+        current.add(1, 'day');
+        continue;
+      }
+
+      if (holiday) {
+        const hasRealPunch = !!(record && record.checkIn?.time);
+        const workedOnHoliday = hasRealPunch;
+
+        totalDays.push({
+          date: dateKey,
+          status: 'holiday',
+          isPreDoj,
+          holidayName: holiday.name,
+          holidayType: holiday.type,
+          holidayCategory: holiday.category,
+          holidayDescription: holiday.description || null,
+          holidayMaxAllowed: holiday.maxAllowed ?? null,
+          holidayImage: holiday.image || null,             // ✅ full image object
+          holidayImageUrl: holiday.image?.url || null,     // ✅ convenient flat URL
+          holidayImageThumbnail: holiday.image?.url
+            ? holiday.image.url.replace(
+              '/upload/',
+              '/upload/w_200,h_200,c_fill,q_auto,f_auto/'
+            )
+            : null,
+          workHours: hasRealPunch ? record.workHours || 0 : 0,
+          checkIn: { time: record?.checkIn?.time || null },
+          checkOut: { time: record?.checkOut?.time || null },
+          isLate: record?.isLate || false,
+          workedOnHoliday,
+          checkInTimeFormatted: record?.checkIn?.time
+            ? formatISTTime(record.checkIn.time)
+            : null,
+          checkOutTimeFormatted: record?.checkOut?.time
+            ? formatISTTime(record.checkOut.time)
+            : null,
+        });
+
+        current.add(1, 'day');
+        continue;
+      }
+
+      let isWeekend = false;
+      if (weekendType === 'sunday') {
+        isWeekend = day === 0;
+      } else if (weekendType === 'saturday_sunday') {
+        isWeekend = day === 0 || day === 6;
+      }
+
+      const hasRealPunch = !!(record && record.checkIn?.time);
+
+      if (comboOff) {
+        totalDays.push({
+          date: dateKey,
+          status: 'combo-off',
+          comboOffStatus: comboOff.status,
+          remarks: comboOff.remarks || null,
+          approvedBy: comboOff.approvedBy || null,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (leave) {
+        totalDays.push({
+          date: dateKey,
+          status: 'on-leave',
+          leaveType: leave.type || leave.leaveType,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (hasRealPunch) {
+        const isToday = current.isSame(today, 'day');
+
+        let workHours = record.workHours || 0;
+        if (isToday) {
+          workHours = getCurrentWorkHours(record);
+        } else if (record.checkIn?.time && record.checkOut?.time) {
+          workHours = computeWorkHours(
+            record.checkIn.time,
+            record.checkOut.time
+          );
+        }
+
+        const missedCheckout =
+          !isToday && !!record.checkIn?.time && !record.checkOut?.time;
+
+        const {
+          _id,
+          employee,
+          createdAt,
+          updatedAt,
+          __v,
+          ...cleanRecord
+        } = record;
+
+        totalDays.push({
+          ...cleanRecord,
+          date: dateKey,
+          status: record.status || 'present',
+          workHours,
+          missedCheckout,
+          holidayName: null,
+          holidayType: null,
+          isRestrictedHoliday: false,
+          isWeeklyOffWork: isWeekend || false,
+          checkInTimeFormatted: record.checkIn?.time
+            ? formatISTTime(record.checkIn.time)
+            : null,
+          checkOutTimeFormatted: record.checkOut?.time
+            ? formatISTTime(record.checkOut.time)
+            : null,
+        });
+      } else if (isWeekend) {
+        totalDays.push({
+          date: dateKey,
+          status: 'weekly-off',
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else {
+        totalDays.push({
+          date: dateKey,
+          status: 'absent',
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      }
+
+      current.add(1, 'day');
+    }
+
+    const stats = {
+      totalDays: totalDays.length,
+      present: totalDays.filter((a) => a.status === 'present').length,
+      absent: totalDays.filter((a) => a.status === 'absent').length,
+      halfDay: totalDays.filter((a) => a.status === 'half-day').length,
+      onLeave: totalDays.filter((a) => a.status === 'on-leave').length,
+
+      // Count holidays, but exclude pre-DOJ holidays from the total.
+      // If you want pre-DOJ holidays counted too, drop the `!a.isPreDoj` check.
+      holiday: totalDays.filter(
+        (a) => a.status === 'holiday' && !a.isPreDoj
+      ).length,
+
+      weeklyOff: totalDays.filter((a) => a.status === 'weekly-off').length,
+      comboOff: totalDays.filter((a) => a.status === 'combo-off').length,
+
+      totalWorkHours: Number(
+        totalDays.reduce((s, a) => s + (a.workHours || 0), 0).toFixed(2)
+      ),
+      lateCount: totalDays.filter((a) => a.isLate).length,
+
+      workedOnHoliday: totalDays.filter(
+        (a) => a.status === 'holiday' && a.workedOnHoliday
+      ).length,
+      workedOnWeeklyOff: totalDays.filter(
+        (a) => a.status === 'present' && a.isWeeklyOffWork
+      ).length,
+      missedCheckouts: totalDays.filter((a) => a.missedCheckout).length,
     };
 
     res.status(200).json({
@@ -1562,64 +1730,181 @@ exports.getEmployeeAttendance = async (req, res) => {
     const { startDate, endDate, month, year } = req.query;
     const employeeId = req.params.employeeId;
 
-    // fetch employee details
-    const user = await User.findById(employeeId).select("firstName lastName fullName email employeeId weekendType dateOfJoining");
+    const user = await User.findById(employeeId).select(
+      'firstName lastName fullName email employeeId weekendType dateOfJoining createdAt'
+    );
+
     if (!user) {
-      return res.status(404).json({ success: false, message: "Employee not found" });
+      return res.status(404).json({
+        success: false,
+        message: 'Employee not found',
+      });
     }
 
-    const weekendType = user.weekendType || "sunday";
-    const doj = moment(user.dateOfJoining).tz("Asia/Kolkata").startOf("day");
+    const weekendType = user.weekendType || 'sunday';
 
-    // date range
+    // ── DOJ-safe effective tracking start ─────────────────────────────
+    const dojFromProfile = user.dateOfJoining
+      ? moment(user.dateOfJoining).tz('Asia/Kolkata').startOf('day')
+      : null;
+
+    const firstRealPunch = await Attendance.findOne({
+      employee: employeeId,
+      'checkIn.time': { $ne: null },
+    })
+      .sort({ date: 1 })
+      .select('date')
+      .lean();
+
+    const firstPunchMoment = firstRealPunch
+      ? moment(firstRealPunch.date).tz('Asia/Kolkata').startOf('day')
+      : null;
+
+    let doj;
+    if (dojFromProfile && firstPunchMoment) {
+      doj = moment.max(dojFromProfile, firstPunchMoment);
+    } else if (dojFromProfile) {
+      doj = dojFromProfile;
+    } else if (firstPunchMoment) {
+      doj = firstPunchMoment;
+    } else {
+      doj = moment.tz('Asia/Kolkata').startOf('day');
+    }
+
     let start, end;
     if (startDate && endDate) {
-      start = moment.tz(startDate, "Asia/Kolkata").startOf("day");
-      end = moment.tz(endDate, "Asia/Kolkata").endOf("day");
+      start = moment.tz(startDate, 'Asia/Kolkata').startOf('day');
+      end = moment.tz(endDate, 'Asia/Kolkata').endOf('day');
     } else if (month && year) {
-      start = moment.tz({ year, month: month - 1, day: 1 }, "Asia/Kolkata").startOf("day");
-      end = moment(start).endOf("month");
+      start = moment
+        .tz({ year: +year, month: +month - 1, day: 1 }, 'Asia/Kolkata')
+        .startOf('day');
+      end = moment(start).endOf('month');
     } else {
-      start = moment.tz("Asia/Kolkata").startOf("month");
-      end = moment(start).endOf("month");
+      start = moment.tz('Asia/Kolkata').startOf('month');
+      end = moment(start).endOf('month');
     }
 
     start = moment.max(start, doj);
+
+    if (start.isAfter(end, 'day')) {
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        stats: {
+          totalDays: 0,
+          present: 0,
+          absent: 0,
+          halfDay: 0,
+          onLeave: 0,
+          holiday: 0,
+          weeklyOff: 0,
+          comboOff: 0,
+          totalWorkHours: 0,
+          lateCount: 0,
+        },
+        attendance: [],
+        employee: {
+          _id: user._id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          fullName: user.fullName || `${user.firstName} ${user.lastName}`,
+          email: user.email,
+          employeeId: user.employeeId,
+          weekendType: user.weekendType,
+          dateOfJoining: user.dateOfJoining,
+        },
+      });
+    }
+
     const startUTC = start.clone().utc().toDate();
     const endUTC = end.clone().utc().toDate();
 
-    // fetch all data
-    const [attendance, holidays, comboOffs] = await Promise.all([
-      Attendance.find({ employee: employeeId, date: { $gte: startUTC, $lte: endUTC } })
-        .sort({ date: -1 }).lean(),
-      Holiday.find({ date: { $gte: startUTC, $lte: endUTC }, isActive: true }).lean(),
-      ComboOff.find({ employee: employeeId, date: { $gte: startUTC, $lte: endUTC }, status: { $in: ["approved", "used", "earned"] } }).lean()
+    const [attendance, holidays, comboOffs, leaves] = await Promise.all([
+      Attendance.find({
+        employee: employeeId,
+        date: { $gte: startUTC, $lte: endUTC },
+      })
+        .sort({ date: -1 })
+        .lean(),
+      Holiday.find({
+        date: { $gte: startUTC, $lte: endUTC },
+        isActive: true,
+      }).lean(),
+      ComboOff.find({
+        employee: employeeId,
+        date: { $gte: startUTC, $lte: endUTC },
+        status: { $in: ['approved', 'used', 'earned'] },
+      }).lean(),
+      Leave.find({
+        employee: employeeId,
+        fromDate: { $lte: endUTC },
+        toDate: { $gte: startUTC },
+        status: 'approved',
+      }).lean(),
     ]);
 
-    const attendanceMap = new Map(attendance.map(a => [moment(a.date).format("YYYY-MM-DD"), a]));
-    const holidayMap = new Map(holidays.map(h => [moment(h.date).format("YYYY-MM-DD"), h]));
-    const comboOffMap = new Map(comboOffs.map(c => [moment(c.date).format("YYYY-MM-DD"), c]));
+    const attendanceMap = new Map(
+      attendance.map((a) => [
+        moment(a.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        a,
+      ])
+    );
+    const holidayMap = new Map(
+      holidays.map((h) => [
+        moment(h.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        h,
+      ])
+    );
+    const comboOffMap = new Map(
+      comboOffs.map((c) => [
+        moment(c.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        c,
+      ])
+    );
 
-    const today = moment.tz("Asia/Kolkata").startOf("day");
+    const leaveMap = new Map();
+    leaves.forEach((l) => {
+      let d = moment(l.fromDate).tz('Asia/Kolkata').startOf('day');
+      const last = moment(l.toDate).tz('Asia/Kolkata').startOf('day');
+      while (d.isSameOrBefore(last, 'day')) {
+        leaveMap.set(d.format('YYYY-MM-DD'), l);
+        d.add(1, 'day');
+      }
+    });
+
+    const today = moment.tz('Asia/Kolkata').startOf('day');
     const totalDays = [];
     let current = start.clone();
 
-    while (current.isSameOrBefore(end, "day") && current.isSameOrBefore(today, "day")) {
-      const dateKey = current.format("YYYY-MM-DD");
+    while (
+      current.isSameOrBefore(end, 'day') &&
+      current.isSameOrBefore(today, 'day')
+    ) {
+      if (current.isBefore(doj, 'day')) {
+        current.add(1, 'day');
+        continue;
+      }
+
+      const dateKey = current.format('YYYY-MM-DD');
       const day = getISTDay(current);
 
       const record = attendanceMap.get(dateKey);
       const holiday = holidayMap.get(dateKey);
       const comboOff = comboOffMap.get(dateKey);
+      const leave = leaveMap.get(dateKey);
 
       let isWeekend = false;
-      if (weekendType === "sunday") isWeekend = day === 0;
-      else if (weekendType === "saturday_sunday") isWeekend = day === 0 || day === 6;
+      if (weekendType === 'sunday') isWeekend = day === 0;
+      else if (weekendType === 'saturday_sunday')
+        isWeekend = day === 0 || day === 6;
+
+      const hasRealPunch = !!(record && record.checkIn?.time);
 
       if (comboOff) {
         totalDays.push({
           date: current.toDate(),
-          status: "combo-off",
+          status: 'combo-off',
           comboOffStatus: comboOff.status,
           remarks: comboOff.remarks || null,
           approvedBy: comboOff.approvedBy || null,
@@ -1628,12 +1913,55 @@ exports.getEmployeeAttendance = async (req, res) => {
           checkOut: { time: null },
           isLate: false,
         });
+      } else if (leave) {
+        totalDays.push({
+          date: current.toDate(),
+          status: 'on-leave',
+          leaveType: leave.type || leave.leaveType,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (hasRealPunch) {
+        const isToday = current.isSame(today, 'day');
+        const workHours = isToday
+          ? getCurrentWorkHours(record)
+          : record.checkOut?.time
+            ? computeWorkHours(record.checkIn.time, record.checkOut.time)
+            : record.workHours || 0;
+
+        const {
+          _id,
+          employee,
+          createdAt,
+          updatedAt,
+          __v,
+          ...cleanRecord
+        } = record;
+
+        totalDays.push({
+          ...cleanRecord,
+          date: current.toDate(),
+          workHours,
+          holidayName: holiday?.name || null,
+          holidayType: holiday?.type || null,
+          isRestrictedHoliday: holiday?.category === 'Restricted',
+          isWeeklyOffWork: isWeekend || false,
+          checkInTimeFormatted: record.checkIn?.time
+            ? formatISTTime(record.checkIn.time)
+            : null,
+          checkOutTimeFormatted: record.checkOut?.time
+            ? formatISTTime(record.checkOut.time)
+            : null,
+        });
       } else if (holiday) {
         totalDays.push({
           date: current.toDate(),
-          status: "holiday",
+          status: 'holiday',
           holidayName: holiday.name,
           holidayType: holiday.type,
+          holidayCategory: holiday.category,
           workHours: 0,
           checkIn: { time: null },
           checkOut: { time: null },
@@ -1642,24 +1970,16 @@ exports.getEmployeeAttendance = async (req, res) => {
       } else if (isWeekend) {
         totalDays.push({
           date: current.toDate(),
-          status: "weekly-off",
+          status: 'weekly-off',
           workHours: 0,
           checkIn: { time: null },
           checkOut: { time: null },
           isLate: false,
         });
-      } else if (record) {
-        const workHours = current.isSame(today, "day") ? getCurrentWorkHours(record) : record.workHours;
-        totalDays.push({
-          ...record,
-          workHours,
-          checkInTimeFormatted: record.checkIn?.time ? formatISTTime(record.checkIn.time) : null,
-          checkOutTimeFormatted: record.checkOut?.time ? formatISTTime(record.checkOut.time) : null,
-        });
       } else {
         totalDays.push({
           date: current.toDate(),
-          status: "absent",
+          status: 'absent',
           workHours: 0,
           checkIn: { time: null },
           checkOut: { time: null },
@@ -1667,21 +1987,22 @@ exports.getEmployeeAttendance = async (req, res) => {
         });
       }
 
-      current.add(1, "day");
+      current.add(1, 'day');
     }
 
-    // summary
     const stats = {
       totalDays: totalDays.length,
-      present: totalDays.filter(a => a.status === "present").length,
-      absent: totalDays.filter(a => a.status === "absent").length,
-      halfDay: totalDays.filter(a => a.status === "half-day").length,
-      onLeave: totalDays.filter(a => a.status === "on-leave").length,
-      holiday: totalDays.filter(a => a.status === "holiday").length,
-      weeklyOff: totalDays.filter(a => a.status === "weekly-off").length,
-      comboOff: totalDays.filter(a => a.status === "combo-off").length,
-      totalWorkHours: totalDays.reduce((s, a) => s + (a.workHours || 0), 0),
-      lateCount: totalDays.filter(a => a.isLate).length,
+      present: totalDays.filter((a) => a.status === 'present').length,
+      absent: totalDays.filter((a) => a.status === 'absent').length,
+      halfDay: totalDays.filter((a) => a.status === 'half-day').length,
+      onLeave: totalDays.filter((a) => a.status === 'on-leave').length,
+      holiday: totalDays.filter((a) => a.status === 'holiday').length,
+      weeklyOff: totalDays.filter((a) => a.status === 'weekly-off').length,
+      comboOff: totalDays.filter((a) => a.status === 'combo-off').length,
+      totalWorkHours: Number(
+        totalDays.reduce((s, a) => s + (a.workHours || 0), 0).toFixed(2)
+      ),
+      lateCount: totalDays.filter((a) => a.isLate).length,
     };
 
     res.status(200).json({
@@ -1697,11 +2018,11 @@ exports.getEmployeeAttendance = async (req, res) => {
         email: user.email,
         employeeId: user.employeeId,
         weekendType: user.weekendType,
-        dateOfJoining: user.dateOfJoining
-      }
+        dateOfJoining: user.dateOfJoining,
+      },
     });
   } catch (error) {
-    console.error("Attendance fetch error:", error);
+    console.error('Attendance fetch error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -2363,75 +2684,106 @@ exports.getWorkHoursChartMonthly = async (req, res) => {
 
 // @desc    Export Monthly Attendance Report (FULL HR VERSION - FIXED)
 // @route   GET /api/attendance/export-monthly?month=12&year=2025&format=xlsx
-//          OR /api/attendance/export-current-month
 // @access  Private (hr, superadmin)
 exports.exportMonthlyAttendanceExcel = async (req, res) => {
   try {
     const { month, year, format = 'xlsx', department } = req.query;
 
-    // Auto-detect current month/year in IST
     const now = moment().tz('Asia/Kolkata');
     const selectedMonth = month ? parseInt(month) : now.month() + 1;
     const selectedYear = year ? parseInt(year) : now.year();
 
     if (selectedMonth < 1 || selectedMonth > 12) {
-      return res.status(400).json({ success: false, message: "Invalid month" });
+      return res
+        .status(400)
+        .json({ success: false, message: 'Invalid month' });
     }
 
-    const startDate = moment.tz({ year: selectedYear, month: selectedMonth - 1, day: 1 }, 'Asia/Kolkata').startOf('day');
+    const startDate = moment
+      .tz(
+        { year: selectedYear, month: selectedMonth - 1, day: 1 },
+        'Asia/Kolkata'
+      )
+      .startOf('day');
     const endDate = startDate.clone().endOf('month').endOf('day');
 
-    // Fetch employees excluding admin and superadmin
     const employeeQuery = {
       isActive: true,
-      role: { $nin: ['admin', 'superadmin'] } // exclude both roles
+      role: { $nin: ['admin', 'superadmin'] },
     };
     if (department) employeeQuery.department = department;
 
     const employees = await User.find(employeeQuery)
-      .select('firstName lastName employeeId email department designation weekendType role')
+      .select(
+        'firstName lastName employeeId email department designation weekendType role dateOfJoining'
+      )
       .populate('department', 'name')
       .lean();
 
-
     if (employees.length === 0) {
-      return res.status(404).json({ success: false, message: "No employees found" });
+      return res
+        .status(404)
+        .json({ success: false, message: 'No employees found' });
     }
 
-    // Fetch all data
     const [attendances, holidays, comboOffs, leaves] = await Promise.all([
-      Attendance.find({ date: { $gte: startDate.toDate(), $lte: endDate.toDate() } }).lean(),
-      Holiday.find({ date: { $gte: startDate.toDate(), $lte: endDate.toDate() }, isActive: true }).lean(),
-      ComboOff.find({ date: { $gte: startDate.toDate(), $lte: endDate.toDate() }, status: { $in: ['approved', 'earned', 'used'] } }).lean(),
+      Attendance.find({
+        date: { $gte: startDate.toDate(), $lte: endDate.toDate() },
+      }).lean(),
+      Holiday.find({
+        date: { $gte: startDate.toDate(), $lte: endDate.toDate() },
+        isActive: true,
+      }).lean(),
+      ComboOff.find({
+        date: { $gte: startDate.toDate(), $lte: endDate.toDate() },
+        status: { $in: ['approved', 'earned', 'used'] },
+      }).lean(),
       Leave.find({
-        startDate: { $lte: endDate.toDate() },
-        endDate: { $gte: startDate.toDate() },
-        status: 'approved'
-      }).lean()
+        fromDate: { $lte: endDate.toDate() },
+        toDate: { $gte: startDate.toDate() },
+        status: 'approved',
+      }).lean(),
     ]);
 
-    // Build lookup maps
-    const holidayMap = new Map(holidays.map(h => [moment(h.date).tz('Asia/Kolkata').format('YYYY-MM-DD'), h.name]));
-    const comboOffMap = new Map(comboOffs.map(c => [c.employee.toString() + '-' + moment(c.date).tz('Asia/Kolkata').format('YYYY-MM-DD'), true]));
-    const leaveMap = new Map();
+    const holidayMap = new Map(
+      holidays.map((h) => [
+        moment(h.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        h.name,
+      ])
+    );
+    const comboOffMap = new Map(
+      comboOffs.map((c) => [
+        c.employee.toString() +
+        '-' +
+        moment(c.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        true,
+      ])
+    );
 
-    leaves.forEach(leave => {
-      let current = moment(leave.startDate).tz('Asia/Kolkata').startOf('day');
-      const end = moment(leave.endDate).tz('Asia/Kolkata').startOf('day');
+    const leaveMap = new Map();
+    leaves.forEach((leave) => {
+      let current = moment(leave.fromDate).tz('Asia/Kolkata').startOf('day');
+      const end = moment(leave.toDate).tz('Asia/Kolkata').startOf('day');
       while (current.isSameOrBefore(end, 'day')) {
-        const key = leave.employee.toString() + '-' + current.format('YYYY-MM-DD');
+        const key =
+          leave.employee.toString() +
+          '-' +
+          current.format('YYYY-MM-DD');
         leaveMap.set(key, {
-          type: leave.leaveType,
-          duration: leave.leaveDuration || 'full',
-          halfDayType: leave.halfDayType
+          type: leave.type || leave.leaveType,
+          duration: leave.leaveDuration || leave.duration || 'full',
+          halfDayType: leave.halfDayType,
         });
         current.add(1, 'day');
       }
     });
 
     const attendanceMap = new Map();
-    attendances.forEach(a => {
-      const key = a.employee.toString() + '-' + moment(a.date).tz('Asia/Kolkata').format('YYYY-MM-DD');
+    attendances.forEach((a) => {
+      const key =
+        a.employee.toString() +
+        '-' +
+        moment(a.date).tz('Asia/Kolkata').format('YYYY-MM-DD');
       attendanceMap.set(key, a);
     });
 
@@ -2439,20 +2791,42 @@ exports.exportMonthlyAttendanceExcel = async (req, res) => {
 
     for (const emp of employees) {
       const weekendType = emp.weekendType || 'sunday';
-      let present = 0, absent = 0, onLeave = 0, halfDays = 0;
-      let lateCount = 0, totalLateMins = 0, shortCount = 0, totalShortMins = 0;
-      let totalHours = 0, overtimeHours = 0;
-      let firstCheckIn = null, lastCheckOut = null;
-      let weeklyOffs = 0, holidaysCount = 0, comboOffUsed = 0;
+      const empDoj = emp.dateOfJoining
+        ? moment(emp.dateOfJoining).tz('Asia/Kolkata').startOf('day')
+        : startDate.clone();
+
+      let present = 0,
+        absent = 0,
+        onLeave = 0,
+        halfDays = 0;
+      let lateCount = 0,
+        totalLateMins = 0,
+        shortCount = 0,
+        totalShortMins = 0;
+      let totalHours = 0,
+        overtimeHours = 0;
+      let firstCheckIn = null,
+        lastCheckOut = null;
+      let weeklyOffs = 0,
+        holidaysCount = 0,
+        comboOffUsed = 0;
 
       let current = startDate.clone();
       while (current.isSameOrBefore(endDate, 'day')) {
+        // ── Skip pre-joining days ──
+        if (current.isBefore(empDoj, 'day')) {
+          current.add(1, 'day');
+          continue;
+        }
+
         const dateStr = current.format('YYYY-MM-DD');
         const day = current.day();
         const key = emp._id.toString() + '-' + dateStr;
 
-        const isWeekend = (weekendType === 'sunday' && day === 0) ||
-          (weekendType === 'saturday_sunday' && (day === 0 || day === 6));
+        const isWeekend =
+          (weekendType === 'sunday' && day === 0) ||
+          (weekendType === 'saturday_sunday' &&
+            (day === 0 || day === 6));
         const isHoliday = holidayMap.has(dateStr);
         const isComboOff = comboOffMap.has(key);
         const leaveData = leaveMap.get(key);
@@ -2463,7 +2837,7 @@ exports.exportMonthlyAttendanceExcel = async (req, res) => {
         if (isComboOff) comboOffUsed++;
 
         if (isComboOff || isHoliday || isWeekend) {
-          // Skip
+          // Skip (non-working context)
         } else if (leaveData) {
           if (leaveData.duration === 'half') {
             onLeave += 0.5;
@@ -2471,105 +2845,158 @@ exports.exportMonthlyAttendanceExcel = async (req, res) => {
           } else {
             onLeave += 1;
           }
-        } else if (record) {
-          const hours = parseFloat(record.workHours) || 0;
-          totalHours += hours;
+        } else if (record && record.checkIn?.time) {
+          // ✅ Only a real punch wins over holiday/weekend
+          const isToday = current.isSame(today, 'day');
 
-          if (record.checkIn?.time && (!firstCheckIn || record.checkIn.time < firstCheckIn))
-            firstCheckIn = record.checkIn.time;
-          if (record.checkOut?.time && (!lastCheckOut || record.checkOut.time > lastCheckOut))
-            lastCheckOut = record.checkOut.time;
-
-          if (record.isLate) { lateCount++; totalLateMins += record.lateBy || 0; }
-          if (record.isShortAttendance) { shortCount++; totalShortMins += record.shortByMinutes || 0; }
-
-          if (hours >= 8) {
-            present++;
-            if (hours > 9) overtimeHours += (hours - 9);
-          } else if (hours >= 4) {
-            halfDays++;
-            present++;
-          } else {
-            absent++;
+          let workHours = record.workHours || 0;
+          if (isToday) {
+            workHours = getCurrentWorkHours(record);
+          } else if (record.checkIn?.time && record.checkOut?.time) {
+            workHours = computeWorkHours(record.checkIn.time, record.checkOut.time);
           }
+
+          const missedCheckout =
+            !isToday && !!record.checkIn?.time && !record.checkOut?.time;
+
+          const { _id, employee, createdAt, updatedAt, __v, ...cleanRecord } = record;
+
+          totalDays.push({
+            ...cleanRecord,
+            date: dateKey,
+            status: record.status || 'present',
+            workHours,
+            missedCheckout,
+            holidayName: holiday?.name || null,
+            holidayType: holiday?.type || null,
+            isRestrictedHoliday: holiday?.category === 'Restricted',
+            isWeeklyOffWork: isWeekend || false,
+            checkInTimeFormatted: record.checkIn?.time
+              ? formatISTTime(record.checkIn.time)
+              : null,
+            checkOutTimeFormatted: record.checkOut?.time
+              ? formatISTTime(record.checkOut.time)
+              : null,
+          });
         } else {
           absent++;
         }
-
         current.add(1, 'day');
       }
 
       const workableDays = present + absent + onLeave;
-      const attendancePercent = workableDays > 0 ? ((present + halfDays * 0.5) / workableDays * 100).toFixed(2) : '0.00';
+      const attendancePercent =
+        workableDays > 0
+          ? (((present + halfDays * 0.5) / workableDays) * 100).toFixed(2)
+          : '0.00';
 
       rows.push({
         'Emp ID': emp.employeeId || '-',
         'Employee Name': `${emp.firstName} ${emp.lastName}`.trim(),
-        'Department': emp.department?.name || 'N/A',
-        'Designation': emp.designation || 'N/A',
-        'Email': emp.email,
-        'Month': startDate.format('MMMM YYYY'),
+        Department: emp.department?.name || 'N/A',
+        Designation: emp.designation || 'N/A',
+        Email: emp.email,
+        Month: startDate.format('MMMM YYYY'),
         'Total Days': startDate.daysInMonth(),
         'Working Days': workableDays.toFixed(1),
-        'Present': present,
+        Present: present,
         'Half Days': halfDays,
-        'Absent': absent,
-        'On Leave': onLeave % 1 === 0 ? onLeave : parseFloat(onLeave.toFixed(1)),
+        Absent: absent,
+        'On Leave':
+          onLeave % 1 === 0 ? onLeave : parseFloat(onLeave.toFixed(1)),
         'Weekly Offs': weeklyOffs,
-        'Holidays': holidaysCount,
+        Holidays: holidaysCount,
         'Combo Off Used': comboOffUsed,
         'Late Arrivals': lateCount,
         'Late By (Mins)': totalLateMins,
         'Short Attendance': shortCount,
         'Short By (Mins)': totalShortMins,
         'Total Work Hours': totalHours.toFixed(2),
-        'Avg Hours/Present Day': present > 0 ? (totalHours / present).toFixed(2) : '0.00',
+        'Avg Hours/Present Day':
+          present > 0 ? (totalHours / present).toFixed(2) : '0.00',
         'Overtime Hours': overtimeHours.toFixed(2),
-        'First Check-in': firstCheckIn ? moment(firstCheckIn).tz('Asia/Kolkata').format('DD MMM, hh:mm A') : '-',
-        'Last Check-out': lastCheckOut ? moment(lastCheckOut).tz('Asia/Kolkata').format('DD MMM, hh:mm A') : '-',
-        'Attendance %': attendancePercent + '%'
+        'First Check-in': firstCheckIn
+          ? moment(firstCheckIn)
+            .tz('Asia/Kolkata')
+            .format('DD MMM, hh:mm A')
+          : '-',
+        'Last Check-out': lastCheckOut
+          ? moment(lastCheckOut)
+            .tz('Asia/Kolkata')
+            .format('DD MMM, hh:mm A')
+          : '-',
+        'Attendance %': attendancePercent + '%',
       });
     }
 
-    // Sort by name
     rows.sort((a, b) => a['Employee Name'].localeCompare(b['Employee Name']));
 
-    // Excel Workbook
     const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet(`Attendance - ${startDate.format('MMM YYYY')}`);
+    const worksheet = workbook.addWorksheet(
+      `Attendance - ${startDate.format('MMM YYYY')}`
+    );
 
-    worksheet.columns = Object.keys(rows[0]).map(key => ({
+    worksheet.columns = Object.keys(rows[0]).map((key) => ({
       header: key,
       key,
-      width: ['Employee Name', 'Email', 'First Check-in', 'Last Check-out'].includes(key) ? 28 : 18
+      width: [
+        'Employee Name',
+        'Email',
+        'First Check-in',
+        'Last Check-out',
+      ].includes(key)
+        ? 28
+        : 18,
     }));
 
     worksheet.addRows(rows);
 
-    // Styling
     const headerRow = worksheet.getRow(1);
     headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E40AF' } };
+    headerRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF1E40AF' },
+    };
     headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
 
-    worksheet.mergeCells('A1:' + String.fromCharCode(64 + worksheet.columns.length) + '1');
+    worksheet.mergeCells(
+      'A1:' +
+      String.fromCharCode(64 + worksheet.columns.length) +
+      '1'
+    );
     const titleCell = worksheet.getCell('A1');
-    titleCell.value = `Monthly Attendance Report - ${startDate.format('MMMM YYYY')}`;
-    titleCell.font = { bold: true, size: 18, color: { argb: 'FF1E40AF' } };
+    titleCell.value = `Monthly Attendance Report - ${startDate.format(
+      'MMMM YYYY'
+    )}`;
+    titleCell.font = {
+      bold: true,
+      size: 18,
+      color: { argb: 'FF1E40AF' },
+    };
     titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
 
     worksheet.spliceRows(2, 0, []);
-    worksheet.getRow(3).values = worksheet.columns.map(c => c.header);
+    worksheet.getRow(3).values = worksheet.columns.map((c) => c.header);
     worksheet.getRow(3).font = { bold: true };
-    worksheet.getRow(3).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3F4F6' } };
+    worksheet.getRow(3).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFF3F4F6' },
+    };
 
-    // Send file
-    const fileName = `Attendance_Report_${selectedMonth}_${selectedYear}.${format === 'csv' ? 'csv' : 'xlsx'}`;
-    res.setHeader('Content-Type', format === 'csv'
-      ? 'text/csv'
-      : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    const fileName = `Attendance_Report_${selectedMonth}_${selectedYear}.${format === 'csv' ? 'csv' : 'xlsx'
+      }`;
+    res.setHeader(
+      'Content-Type',
+      format === 'csv'
+        ? 'text/csv'
+        : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     );
-    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${fileName}"`
+    );
 
     if (format === 'csv') {
       await workbook.csv.write(res);
@@ -2577,7 +3004,6 @@ exports.exportMonthlyAttendanceExcel = async (req, res) => {
       await workbook.xlsx.write(res);
     }
     res.end();
-
   } catch (error) {
     console.error('Export Error:', error);
     res.status(500).json({ success: false, message: error.message });

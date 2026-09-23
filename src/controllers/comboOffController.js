@@ -235,14 +235,56 @@ exports.getMonthlyComboOffSummary = async (req, res) => {
       });
     }
 
-    const startDate = moment.tz(`${year}-${month}-01`, "Asia/Kolkata").startOf("month");
+    const monthNumber = Number(month);
+    const yearNumber = Number(year);
+
+    if (
+      !Number.isInteger(monthNumber) ||
+      monthNumber < 1 ||
+      monthNumber > 12
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Month must be between 1 and 12",
+      });
+    }
+
+    if (
+      !Number.isInteger(yearNumber) ||
+      yearNumber < 2000 ||
+      yearNumber > 2100
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid year",
+      });
+    }
+
+    const formattedMonth = String(monthNumber).padStart(2, "0");
+
+    const startDate = moment.tz(
+      `${yearNumber}-${formattedMonth}-01`,
+      "YYYY-MM-DD",
+      true
+    );
+
+    if (!startDate.isValid()) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid month/year",
+      });
+    }
+
     const endDate = startDate.clone().endOf("month");
 
     const summary = await ComboOff.aggregate([
       {
         $match: {
           status: "approved",
-          workDate: { $gte: startDate.toDate(), $lte: endDate.toDate() },
+          workDate: {
+            $gte: startDate.toDate(),
+            $lte: endDate.toDate(),
+          },
         },
       },
       {
@@ -259,28 +301,45 @@ exports.getMonthlyComboOffSummary = async (req, res) => {
           as: "employee",
         },
       },
-      { $unwind: "$employee" },
+      {
+        $unwind: "$employee",
+      },
       {
         $project: {
           _id: 0,
           employeeId: "$employee._id",
-          name: { $concat: ["$employee.firstName", " ", "$employee.lastName"] },
+          name: {
+            $concat: [
+              "$employee.firstName",
+              " ",
+              "$employee.lastName",
+            ],
+          },
           email: "$employee.email",
           totalApproved: 1,
         },
       },
+      {
+        $sort: {
+          name: 1,
+        },
+      },
     ]);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      month,
-      year,
+      month: monthNumber,
+      year: yearNumber,
       totalEmployees: summary.length,
       summary,
     });
   } catch (error) {
     console.error("🔥 Error fetching monthly summary:", error);
-    res.status(500).json({ success: false, message: "Server error" });
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
   }
 };
 

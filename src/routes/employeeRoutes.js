@@ -1,57 +1,62 @@
-// routes/employeeRoutes.js
 const express = require('express');
 const router = express.Router();
-
 const {
   protect,
-  managerAndAbove,       // super_admin + hr_admin + manager
-  hrAdminAndAbove,       // super_admin + hr_admin
-  superAdminOnly,        // super_admin only
+  managerAndAbove,
+  hrAdminAndAbove,
+  superAdminOnly,
 } = require('../middleware/auth');
-
 const { upload } = require('../middleware/upload');
-const c = require('../controllers/employeeController');
+const {
+  getAllHRs,
+  getEmployeeList,
+  getAllEmployees,
+  createEmployee,
+  getEmployee,
+  updateEmployee,
+  deleteEmployee,
+  uploadDocument,
+  updateProfilePicture,
+  toggleHRAvailability,
+  getAvailabilityStatus,
+} = require('../controllers/employeeController');
 
 router.use(protect);
 
-// ─────────────────────────────────────────────
-// Static / collection routes  (must come BEFORE /:id)
-// ─────────────────────────────────────────────
-router.get('/hr', c.getAllHRs);
-router.get('/last-seen', c.getEmployeeList);
-router.get('/', managerAndAbove, c.getAllEmployees);
-router.post('/', hrAdminAndAbove, c.createEmployee);
+// Static routes
+router.get('/hr', getAllHRs);
+router.get('/last-seen', getEmployeeList);
+router.get('/', managerAndAbove, getAllEmployees);
+router.post('/', hrAdminAndAbove, createEmployee);
 
-// ─────────────────────────────────────────────
-// Parameterized routes
-// ─────────────────────────────────────────────
-router.get('/:id', c.getEmployee);
-router.put('/:id', hrAdminAndAbove, c.updateEmployee);
-router.delete('/:id', superAdminOnly, c.deleteEmployee);
+// Parameter routes
+router.get('/:id', getEmployee);
+router.put('/:id', hrAdminAndAbove, updateEmployee);
+router.delete('/:id', superAdminOnly, deleteEmployee);
 
 router.post(
   '/:id/documents',
   hrAdminAndAbove,
   upload.single('document'),
-  c.uploadDocument
+  uploadDocument
 );
 
 router.put(
   '/:id/profile-picture',
   upload.single('profilePicture'),
-  c.updateProfilePicture
+  updateProfilePicture
 );
 
 router.put(
   '/:id/availability',
   hrAdminAndAbove,
-  c.toggleHRAvailability
+  toggleHRAvailability
 );
 
 router.get(
   '/:id/availability-status',
   managerAndAbove,
-  c.getAvailabilityStatus
+  getAvailabilityStatus
 );
 
 module.exports = router;

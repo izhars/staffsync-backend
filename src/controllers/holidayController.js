@@ -3,6 +3,10 @@ const mongoose = require('mongoose');
 const csv = require('csv-parser');
 const fs = require('fs');
 const createCsvWriter = require('csv-writer').createObjectCsvWriter;
+const {
+  uploadHolidayImage,
+  deleteFromCloudinary
+} = require('../middleware/upload');
 
 // Add one or multiple holidays
 exports.addHoliday = async (req, res) => {
@@ -21,9 +25,10 @@ exports.addHoliday = async (req, res) => {
         const {
           name, date, description,
           type = 'Festival',
-          category = 'Mandatory',  // ✅ NEW
-          maxAllowed = null,        // ✅ NEW
-          applicableTo = ['all']    // ✅ NEW
+          category = 'Mandatory',
+          maxAllowed = null,
+          applicableTo = ['all'],
+          image = null // ✅ NEW: Accept image data
         } = h;
 
         // Validate required fields
@@ -32,13 +37,13 @@ exports.addHoliday = async (req, res) => {
           continue;
         }
 
-        // ✅ Validate category
+        // Validate category
         if (!['Mandatory', 'Restricted'].includes(category)) {
           errors.push(`Holiday "${name}": Category must be 'Mandatory' or 'Restricted'`);
           continue;
         }
 
-        // ✅ Validate maxAllowed for restricted holidays
+        // Validate maxAllowed for restricted holidays
         if (category === 'Restricted' && maxAllowed !== null) {
           if (!Number.isInteger(maxAllowed) || maxAllowed < 1) {
             errors.push(`Holiday "${name}": maxAllowed must be a positive integer`);
@@ -67,10 +72,11 @@ exports.addHoliday = async (req, res) => {
           date: parsedDate,
           description,
           type,
-          category,           // ✅ NEW
-          maxAllowed: category === 'Restricted' ? maxAllowed : null, // ✅ NEW
-          applicableTo,       // ✅ NEW
-          createdBy: req.user?._id // ✅ NEW
+          category,
+          maxAllowed: category === 'Restricted' ? maxAllowed : null,
+          applicableTo,
+          image, // ✅ NEW
+          createdBy: req.user?._id
         }], { session });
 
         createdHolidays.push(holiday[0]);
@@ -100,6 +106,243 @@ exports.addHoliday = async (req, res) => {
   } catch (error) {
     console.error('Add holiday error:', error);
     res.status(500).json({ message: 'Failed to create holidays', error: error.message });
+  }
+};
+
+// ✅ NEW: Upload holiday image
+exports.uploadHolidayImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No image file uploaded' });
+    }
+
+    const holiday = await Holiday.findById(id);
+    if (!holiday) {
+      return res.status(404).json({ message: 'Holiday not found' });
+    }
+
+    // Delete old image if exists
+    if (holiday.image && holiday.image.publicId) {
+      try {
+        await deleteFromCloudinary(holiday.image.publicId);
+        console.log('🗑️ Old holiday image deleted:', holiday.image.publicId);
+      } catch (err) {
+        console.error('Failed to delete old image:', err.message);
+        // Continue even if delete fails
+      }
+    }
+
+    // Upload new image
+    const uploadResult = await uploadHolidayImage(req.file.buffer, {
+      folder: `holiday_images/${id}`
+    });
+
+    // Update holiday with image data
+    holiday.image = {
+      url: uploadResult.url,
+      publicId: uploadResult.publicId,
+      format: uploadResult.format,
+      bytes: uploadResult.bytes,
+      width: uploadResult.width,
+      height: uploadResult.height,
+      originalFilename: uploadResult.originalFilename,
+      uploadedAt: new Date()
+    };
+
+    await holiday.save();
+
+    res.json({
+      success: true,
+      message: 'Holiday image uploaded successfully',
+      data: {
+        holiday: holiday,
+        image: holiday.image
+      }
+    });
+
+  } catch (error) {
+    console.error('Upload holiday image error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to upload holiday image',
+      error: error.message
+    });
+  }
+};
+
+// ✅ NEW: Delete holiday image
+exports.deleteHolidayImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const holiday = await Holiday.findById(id);
+    if (!holiday) {
+      return res.status(404).json({ message: 'Holiday not found' });
+    }
+
+    if (!holiday.image || !holiday.image.publicId) {
+      return res.status(400).json({ message: 'Holiday has no image to delete' });
+    }
+
+    // Delete from Cloudinary
+    await deleteFromCloudinary(holiday.image.publicId);
+
+    // Remove image data from holiday
+    holiday.image = {
+      url: null,
+      publicId: null,
+      format: null,
+      bytes: null,
+      width: null,
+      height: null,
+      originalFilename: null,
+      uploadedAt: null
+    };
+
+    await holiday.save();
+
+    res.json({
+      success: true,
+      message: 'Holiday image deleted successfully',
+      data: holiday
+    });
+
+  } catch (error) {
+    console.error('Delete holiday image error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete holiday image',
+      error: error.message
+    });
+  }
+};
+
+// Update holiday
+exports.updateHoliday = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+
+    // ✅ Validate category if provided
+    if (updateData.category &&
+      !['Mandatory', 'Restricted'].includes(updateData.category)) {
+      return res.status(400).json({
+        message: "Category must be 'Mandatory' or 'Restricted'"
+      });
+    }
+
+    // ✅ If changing to Mandatory, clear maxAllowed
+    if (updateData.category === 'Mandatory') {
+      updateData.maxAllowed = null;
+    }
+
+    // ✅ Validate maxAllowed for restricted
+    if (updateData.category === 'Restricted' && updateData.maxAllowed !== null) {
+      if (!Number.isInteger(updateData.maxAllowed) || updateData.maxAllowed < 1) {
+        return res.status(400).json({
+          message: 'maxAllowed must be a positive integer for Restricted holidays'
+        });
+      }
+    }
+
+    if (updateData.date) {
+      const parsedDate = new Date(updateData.date);
+      if (isNaN(parsedDate.getTime())) {
+        return res.status(400).json({ message: 'Invalid date format' });
+      }
+      updateData.date = parsedDate;
+
+      const existing = await Holiday.findOne({
+        date: updateData.date,
+        _id: { $ne: id }
+      });
+
+      if (existing) {
+        return res.status(400).json({
+          message: `Holiday already exists on ${updateData.date.toDateString()}`
+        });
+      }
+    }
+
+    const holiday = await Holiday.findByIdAndUpdate(
+      id,
+      { ...updateData, updatedAt: new Date() },
+      { new: true, runValidators: true }
+    );
+
+    if (!holiday) {
+      return res.status(404).json({ message: 'Holiday not found' });
+    }
+
+    res.json({
+      message: 'Holiday updated successfully',
+      data: holiday
+    });
+  } catch (error) {
+    console.error('Update holiday error:', error);
+    res.status(500).json({ message: 'Failed to update holiday', error: error.message });
+  }
+};
+
+// ✅ NEW: Update holiday image (replace)
+exports.updateHolidayImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No image file uploaded' });
+    }
+
+    const holiday = await Holiday.findById(id);
+    if (!holiday) {
+      return res.status(404).json({ message: 'Holiday not found' });
+    }
+
+    // Delete old image if exists
+    if (holiday.image && holiday.image.publicId) {
+      try {
+        await deleteFromCloudinary(holiday.image.publicId);
+      } catch (err) {
+        console.error('Failed to delete old image:', err.message);
+      }
+    }
+
+    // Upload new image
+    const uploadResult = await uploadHolidayImage(req.file.buffer, {
+      folder: `holiday_images/${id}`
+    });
+
+    holiday.image = {
+      url: uploadResult.url,
+      publicId: uploadResult.publicId,
+      format: uploadResult.format,
+      bytes: uploadResult.bytes,
+      width: uploadResult.width,
+      height: uploadResult.height,
+      originalFilename: uploadResult.originalFilename,
+      uploadedAt: new Date()
+    };
+
+    await holiday.save();
+
+    res.json({
+      success: true,
+      message: 'Holiday image updated successfully',
+      data: {
+        holiday: holiday,
+        image: holiday.image
+      }
+    });
+
+  } catch (error) {
+    console.error('Update holiday image error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update holiday image',
+      error: error.message
+    });
   }
 };
 
@@ -280,71 +523,41 @@ exports.getHolidayById = async (req, res) => {
 };
 
 // Update holiday
-exports.updateHoliday = async (req, res) => {
+exports.deleteHoliday = async (req, res) => {
   try {
     const { id } = req.params;
-    const updateData = req.body;
 
-    // ✅ Validate category if provided
-    if (updateData.category &&
-      !['Mandatory', 'Restricted'].includes(updateData.category)) {
-      return res.status(400).json({
-        message: "Category must be 'Mandatory' or 'Restricted'"
-      });
-    }
-
-    // ✅ If changing to Mandatory, clear maxAllowed
-    if (updateData.category === 'Mandatory') {
-      updateData.maxAllowed = null;
-    }
-
-    // ✅ Validate maxAllowed for restricted
-    if (updateData.category === 'Restricted' && updateData.maxAllowed !== null) {
-      if (!Number.isInteger(updateData.maxAllowed) || updateData.maxAllowed < 1) {
-        return res.status(400).json({
-          message: 'maxAllowed must be a positive integer for Restricted holidays'
-        });
-      }
-    }
-
-    if (updateData.date) {
-      const parsedDate = new Date(updateData.date);
-      if (isNaN(parsedDate.getTime())) {
-        return res.status(400).json({ message: 'Invalid date format' });
-      }
-      updateData.date = parsedDate;
-
-      const existing = await Holiday.findOne({
-        date: updateData.date,
-        _id: { $ne: id }
-      });
-
-      if (existing) {
-        return res.status(400).json({
-          message: `Holiday already exists on ${updateData.date.toDateString()}`
-        });
-      }
-    }
-
-    const holiday = await Holiday.findByIdAndUpdate(
-      id,
-      { ...updateData, updatedAt: new Date() },
-      { new: true, runValidators: true }
-    );
-
+    const holiday = await Holiday.findById(id);
     if (!holiday) {
       return res.status(404).json({ message: 'Holiday not found' });
     }
 
+    // Delete image from Cloudinary if exists
+    if (holiday.image && holiday.image.publicId) {
+      try {
+        await deleteFromCloudinary(holiday.image.publicId);
+        console.log('🗑️ Holiday image deleted:', holiday.image.publicId);
+      } catch (err) {
+        console.error('Failed to delete holiday image:', err.message);
+        // Continue with soft delete even if image deletion fails
+      }
+    }
+
+    // Soft delete
+    holiday.isActive = false;
+    holiday.deletedAt = new Date();
+    await holiday.save();
+
     res.json({
-      message: 'Holiday updated successfully',
+      message: 'Holiday soft-deleted successfully',
       data: holiday
     });
   } catch (error) {
-    console.error('Update holiday error:', error);
-    res.status(500).json({ message: 'Failed to update holiday', error: error.message });
+    console.error('Delete holiday error:', error);
+    res.status(500).json({ message: 'Failed to delete holiday', error: error.message });
   }
 };
+
 
 // Delete holiday (soft delete)
 exports.deleteHoliday = async (req, res) => {
@@ -379,11 +592,22 @@ exports.permanentDeleteHoliday = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const holiday = await Holiday.findByIdAndDelete(id);
-
+    const holiday = await Holiday.findById(id);
     if (!holiday) {
       return res.status(404).json({ message: 'Holiday not found' });
     }
+
+    // Delete image from Cloudinary if exists
+    if (holiday.image && holiday.image.publicId) {
+      try {
+        await deleteFromCloudinary(holiday.image.publicId);
+        console.log('🗑️ Holiday image permanently deleted:', holiday.image.publicId);
+      } catch (err) {
+        console.error('Failed to delete holiday image:', err.message);
+      }
+    }
+
+    await Holiday.findByIdAndDelete(id);
 
     res.json({
       message: 'Holiday permanently deleted successfully',
@@ -395,10 +619,11 @@ exports.permanentDeleteHoliday = async (req, res) => {
   }
 };
 
+
 // Bulk import holidays from CSV/JSON file
 exports.bulkImportHolidays = async (req, res) => {
   try {
-    console.log('📥 Bulk import started'); // log start
+    console.log('📥 Bulk import started');
 
     if (!req.file) {
       console.log('❌ No file uploaded');
@@ -421,25 +646,24 @@ exports.bulkImportHolidays = async (req, res) => {
       await new Promise((resolve, reject) => {
         const readable = stream.Readable();
         readable.push(fileBuffer);
-        readable.push(null); // End stream
+        readable.push(null);
 
         readable
           .pipe(csv())
           .on('data', (data) => {
-            console.log('➡️ Row parsed:', data);
-
             const holidayData = {
               name: data.name?.trim(),
               date: new Date(data.date),
               description: data.description?.trim() || '',
               type: data.type?.trim() || 'Festival',
-              category: data.category?.trim() || 'Mandatory',   // ✅ NEW
-              maxAllowed: data.maxAllowed ? parseInt(data.maxAllowed) : null, // ✅ NEW
+              category: data.category?.trim() || 'Mandatory',
+              maxAllowed: data.maxAllowed ? parseInt(data.maxAllowed) : null,
               applicableTo: data.applicableTo
                 ? data.applicableTo.split(',').map(s => s.trim())
-                : ['all']                                        // ✅ NEW
+                : ['all'],
+              // ✅ NEW: Image URL from CSV (optional)
+              imageUrl: data.imageUrl?.trim() || null
             };
-
 
             if (holidayData.name && !isNaN(holidayData.date.getTime())) {
               results.push(holidayData);
@@ -469,9 +693,11 @@ exports.bulkImportHolidays = async (req, res) => {
               date: new Date(item.date),
               description: item.description?.trim() || '',
               type: item.type?.trim() || 'Festival',
-              category: item.category?.trim() || 'Mandatory',  // ✅ NEW
-              maxAllowed: item.maxAllowed || null,              // ✅ NEW
-              applicableTo: item.applicableTo || ['all']        // ✅ NEW
+              category: item.category?.trim() || 'Mandatory',
+              maxAllowed: item.maxAllowed || null,
+              applicableTo: item.applicableTo || ['all'],
+              // ✅ NEW: Image URL from JSON (optional)
+              imageUrl: item.imageUrl?.trim() || null
             };
             if (holidayData.name && !isNaN(holidayData.date.getTime())) {
               results.push(holidayData);
@@ -508,7 +734,28 @@ exports.bulkImportHolidays = async (req, res) => {
           continue;
         }
 
-        const holiday = await Holiday.create(holidayData);
+        // ✅ NEW: Handle image URL if provided
+        const holidayPayload = {
+          name: holidayData.name,
+          date: holidayData.date,
+          description: holidayData.description,
+          type: holidayData.type,
+          category: holidayData.category,
+          maxAllowed: holidayData.maxAllowed,
+          applicableTo: holidayData.applicableTo
+        };
+
+        // If imageUrl provided, store it as external image reference
+        if (holidayData.imageUrl) {
+          holidayPayload.image = {
+            url: holidayData.imageUrl,
+            publicId: null, // External URL, no Cloudinary public ID
+            format: holidayData.imageUrl.split('.').pop() || null,
+            uploadedAt: new Date()
+          };
+        }
+
+        const holiday = await Holiday.create(holidayPayload);
         console.log('✅ Holiday created:', holiday.name, holiday.date.toDateString());
         createdHolidays.push(holiday);
       } catch (err) {
@@ -714,5 +961,39 @@ exports.getHolidayStats = async (req, res) => {
   } catch (error) {
     console.error('Get holiday stats error:', error);
     res.status(500).json({ message: 'Failed to fetch statistics', error: error.message });
+  }
+};
+
+
+
+// ✅ NEW: Get holiday image
+exports.getHolidayImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const holiday = await Holiday.findById(id).select('image name');
+    if (!holiday) {
+      return res.status(404).json({ message: 'Holiday not found' });
+    }
+
+    if (!holiday.image || !holiday.image.url) {
+      return res.status(404).json({ message: 'Holiday has no image' });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        holidayId: holiday._id,
+        holidayName: holiday.name,
+        image: holiday.image
+      }
+    });
+  } catch (error) {
+    console.error('Get holiday image error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch holiday image',
+      error: error.message
+    });
   }
 };

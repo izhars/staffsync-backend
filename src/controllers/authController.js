@@ -10,15 +10,15 @@ const emailService = require('../utils/emailService');
 const { generateForgotPasswordEmail } = require('../email/forgotPasswordEmail');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../middleware/upload');
 const { ACCESS_ROLES, ROLE_CREATION_MATRIX, ADMIN_ROLES } = require('../constants/roles');
-
+const crypto = require('crypto');
 const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5000';
 
 // ────────────────────────────────────────────────────────────────
 // JWT helper
 // ────────────────────────────────────────────────────────────────
-const generateToken = (id, role, employeeId) => {
+const generateToken = (id, role, employeeId, sessionId = null) => {
   return jwt.sign(
-    { id, role, employeeId },
+    { id, role, employeeId, sessionId },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRE || '30d' }
   );
@@ -46,7 +46,7 @@ exports.register = async (req, res) => {
 
     // ── 1. Required field validation ─────────────────────────────
     if (!employeeId || !email || !password || !firstName || !lastName
-        || !department || !designation) {
+      || !department || !designation) {
       return res.status(400).json({
         success: false,
         message: 'Employee ID, email, password, names, department, and designation are required',
@@ -104,7 +104,7 @@ exports.register = async (req, res) => {
 
     // ── 5. Managers may only hire into their own department ──────
     if (creatorRole === ACCESS_ROLES.MANAGER
-        && String(deptDoc._id) !== String(req.user.department)) {
+      && String(deptDoc._id) !== String(req.user.department)) {
       return res.status(403).json({
         success: false,
         message: 'Managers can only create users within their own department',
@@ -145,7 +145,7 @@ exports.register = async (req, res) => {
       email: email.toLowerCase().trim(),
       password,
       firstName: firstName.trim(),
-      lastName:  lastName.trim(),
+      lastName: lastName.trim(),
       role: assignedRole,               // ← ACCESS ROLE
       department: deptDoc._id,          // ← DEPARTMENT
       designation: designation.trim(),  // ← DESIGNATION (job title)
@@ -162,23 +162,23 @@ exports.register = async (req, res) => {
       spouseDetails: maritalStatus === 'married' ? (spouseDetails || {}) : {},
       bloodGroup: bloodGroup || null,
       address: {
-        street:     address?.street     || '',
-        city:       address?.city       || '',
-        state:      address?.state      || '',
-        country:    address?.country    || 'India',
+        street: address?.street || '',
+        city: address?.city || '',
+        state: address?.state || '',
+        country: address?.country || 'India',
         postalCode: address?.postalCode || '',
       },
       emergencyContact: emergencyContact || {},
-      panNumber:  panNumber  ? panNumber.toUpperCase().trim() : '',
-      pfNumber:   pfNumber   ? pfNumber.trim()   : '',
-      uanNumber:  uanNumber  ? uanNumber.trim()  : '',
-      documents:      documents      || [],
+      panNumber: panNumber ? panNumber.toUpperCase().trim() : '',
+      pfNumber: pfNumber ? pfNumber.trim() : '',
+      uanNumber: uanNumber ? uanNumber.trim() : '',
+      documents: documents || [],
       profilePicture: profilePicture || '',
       createdBy: req.user._id,
       isVerified: creatorRole === ACCESS_ROLES.SUPER_ADMIN,
       weekendType: weekendType || 'sunday',
       probationStartDate: probationStart,
-      probationEndDate:   probationEnd,
+      probationEndDate: probationEnd,
       isProbationCompleted: false,
       leaveBalance: { casual: 0, sick: 0, earned: 0, unpaid: 0 },
     };
@@ -268,7 +268,9 @@ exports.register = async (req, res) => {
 // ────────────────────────────────────────────────────────────────
 exports.login = async (req, res) => {
   try {
+    console.log('🟢 LOGIN HANDLER HIT - file: authController.js');
     const { email, password, deviceId, fcmToken } = req.body;
+    console.log('🟢 deviceId from body:', deviceId);
 
     if (!email || !password) {
       return res.status(400).json({ success: false, message: 'Please provide email and password' });
@@ -294,20 +296,48 @@ exports.login = async (req, res) => {
       });
     }
 
-    if (user.deviceId && user.deviceId !== deviceId) {
+    // ── DEVICE BINDING CHECK ───────────────────────────────────
+    // If a device is already bound and a *different* device is trying,
+    // block until HR calls /reset-device.
+    if (user.deviceId && deviceId && user.deviceId !== deviceId) {
       return res.status(403).json({
         success: false,
-        message: 'Login denied: You are already logged in on another device. Please contact HR or logout from that device first.',
+        code: 'DEVICE_MISMATCH',
+        message: 'This account is bound to another device. Please contact HR to reset your device.',
       });
     }
 
-    if (deviceId) user.deviceId = deviceId;
+    // ── ROTATE SESSION ─────────────────────────────────────────
+    console.log('🟢 Before session rotation, user.currentSessionId:', user.currentSessionId);
+
+    const sessionId = crypto.randomUUID();
+    console.log('🟢 New sessionId generated:', sessionId);
+
+    const previousSessionId = user.currentSessionId;
+
+    user.currentSessionId = sessionId;
+    user.currentSessionDeviceId = deviceId || null;
+    user.sessionStartedAt = new Date();
+    if (deviceId) user.deviceId = deviceId;              // bind on first login
     if (fcmToken) user.fcmToken = fcmToken;
     user.lastLogin = new Date();
     user.lastLoginDevice = deviceId || null;
-    await user.save({ validateBeforeSave: false });
+    user.lastLoginIp = req.ip;
+    user.lastLoginUserAgent = req.headers['user-agent'] || null;
 
-    const token = generateToken(user._id, user.role, user.employeeId);
+    await user.save({ validateBeforeSave: false });
+    console.log('🟢 After save, user.currentSessionId:', user.currentSessionId);
+
+    const token = generateToken(user._id, user.role, user.employeeId, sessionId);
+    console.log('🟢 Token payload sessionId:', sessionId);
+
+    // ── Real-time kick of any previous session (optional) ──────
+    if (req.io && previousSessionId && previousSessionId !== sessionId) {
+      req.io.to(`user:${user._id}`).emit('force-logout', {
+        reason: 'Logged in from another device',
+        code: 'SESSION_REPLACED',
+      });
+    }
 
     res.status(200).json({
       success: true,
@@ -318,9 +348,9 @@ exports.login = async (req, res) => {
         employeeId: user.employeeId,
         fullName: user.fullName,
         email: user.email,
-        role: user.role,                            // access role
-        department: user.department?.name,          // department
-        designation: user.designation,              // designation
+        role: user.role,
+        department: user.department?.name,
+        designation: user.designation,
         phone: user.phone,
         profilePicture: user.profilePicture,
         isActive: user.isActive,
@@ -333,7 +363,6 @@ exports.login = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error during login' });
   }
 };
-
 // ────────────────────────────────────────────────────────────────
 // @desc    Get current user
 // @route   GET /api/auth/me
@@ -343,14 +372,30 @@ exports.getMe = async (req, res) => {
   try {
     const user = await User.findById(req.user.id)
       .populate('department', 'name code description')
-      .populate('reportingManager', 'firstName lastName email profilePicture')
+      .populate(
+        'reportingManager',
+        'employeeId firstName lastName email profilePicture role designation department'
+      )
       .populate('createdBy', 'firstName lastName');
 
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    res.status(200).json({ success: true, user });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      user,
+    });
   } catch (error) {
     console.error('Get me error:', error);
-    res.status(500).json({ success: false, message: error.message });
+
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 
@@ -580,18 +625,55 @@ exports.resetDevice = async (req, res) => {
     const user = await User.findById(req.params.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
+    // ── 1. Clear device lock ───────────────────────────────────
     user.deviceId = null;
+    user.lastLoginDevice = null;
+    user.fcmToken = null;
+
+    // ── 2. Kill active session → old JWT becomes invalid ───────
+    user.currentSessionId = null;
+    user.currentSessionDeviceId = null;
+    user.sessionStartedAt = null;
+
     await user.save({ validateBeforeSave: false });
+
+    // ── 3. Real-time kick (optional, if Socket.IO is wired) ────
+    if (req.io) {
+      req.io.to(`user:${user._id}`).emit('force-logout', {
+        reason: 'Your device access was reset by HR. Please log in again.',
+        code: 'DEVICE_RESET',
+      });
+    }
 
     res.status(200).json({
       success: true,
-      message: `Device reset for ${user.firstName} ${user.lastName} (${user.employeeId})`,
+      message: `Device & session reset for ${user.firstName} ${user.lastName} (${user.employeeId}). They must log in again.`,
     });
   } catch (error) {
     console.error('Device reset error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+exports.logout = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('currentSessionId');
+    if (user && user.currentSessionId === req.sessionId) {
+      await User.findByIdAndUpdate(req.user.id, {
+        $set: {
+          currentSessionId: null,
+          currentSessionDeviceId: null,
+          sessionStartedAt: null,
+        },
+      });
+    }
+    res.status(200).json({ success: true, message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 
 // ────────────────────────────────────────────────────────────────
 // @desc    Get managers list (for reporting-manager dropdown)
@@ -697,29 +779,29 @@ exports.assignManager = async (req, res) => {
     const trimmed = String(reportingManager).trim();
     const manager = mongoose.Types.ObjectId.isValid(trimmed)
       ? await User.findOne({
-          _id: trimmed,
-          isActive: true,
-          role: {
-            $in: [
-              ACCESS_ROLES.SUPER_ADMIN,
-              ACCESS_ROLES.HR_ADMIN,
-              ACCESS_ROLES.MANAGER,
-              ACCESS_ROLES.TEAM_LEAD,
-            ],
-          },
-        })
+        _id: trimmed,
+        isActive: true,
+        role: {
+          $in: [
+            ACCESS_ROLES.SUPER_ADMIN,
+            ACCESS_ROLES.HR_ADMIN,
+            ACCESS_ROLES.MANAGER,
+            ACCESS_ROLES.TEAM_LEAD,
+          ],
+        },
+      })
       : await User.findOne({
-          employeeId: trimmed.toUpperCase(),
-          isActive: true,
-          role: {
-            $in: [
-              ACCESS_ROLES.SUPER_ADMIN,
-              ACCESS_ROLES.HR_ADMIN,
-              ACCESS_ROLES.MANAGER,
-              ACCESS_ROLES.TEAM_LEAD,
-            ],
-          },
-        });
+        employeeId: trimmed.toUpperCase(),
+        isActive: true,
+        role: {
+          $in: [
+            ACCESS_ROLES.SUPER_ADMIN,
+            ACCESS_ROLES.HR_ADMIN,
+            ACCESS_ROLES.MANAGER,
+            ACCESS_ROLES.TEAM_LEAD,
+          ],
+        },
+      });
 
     if (!manager) {
       return res.status(404).json({

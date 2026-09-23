@@ -6,7 +6,7 @@ const { pushToGithub, getRepoStatus } = require('../services/git.service');
  * @route  POST /api/github/push
  * @access Private (Super Admin only)
  */
-exports.pushCode = async (req, res, next) => {
+exports.pushCode = async (req, res) => {
   try {
     const { message } = req.body;
     const result = await pushToGithub(message);
@@ -26,7 +26,7 @@ exports.pushCode = async (req, res, next) => {
     res.status(500).json({
       success: false,
       message: 'GitHub push failed',
-      error: err.message,
+      error: err.message, // already sanitized in service layer
     });
   }
 };
@@ -36,11 +36,12 @@ exports.pushCode = async (req, res, next) => {
  * @route  GET /api/github/status
  * @access Private (Super Admin only)
  */
-exports.getStatus = async (req, res, next) => {
+exports.getStatus = async (req, res) => {
   try {
     const status = await getRepoStatus();
     res.status(200).json({ success: true, data: status });
   } catch (err) {
+    console.error('❌ GitHub status fetch failed:', err.message);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch repo status',

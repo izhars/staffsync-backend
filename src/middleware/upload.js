@@ -72,7 +72,15 @@ const uploadConfigs = {
     folder: 'bulk_imports',
     resourceType: 'raw'
   },
-
+  holiday: {
+    extensions: ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'],
+    mimeTypes: [
+      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'
+    ],
+    maxSize: 10 * 1024 * 1024, // 10MB
+    folder: 'holiday_images',
+    resourceType: 'image'
+  },
   group: {
     extensions: ['.jpg', '.jpeg', '.png', '.gif', '.webp'],
     mimeTypes: ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'],
@@ -415,6 +423,33 @@ const uploadMultipleFiles = async (files, uploadType = 'expense', options = {}) 
   return Promise.all(uploadPromises);
 };
 
+
+const uploadHolidayImage = async (buffer, options = {}) => {
+  return uploadToCloudinary(buffer, 'holiday', {
+    folder: options.folder || 'holiday_images',
+    resource_type: 'image',
+    transformation: [
+      { width: 1200, height: 800, crop: 'fill', gravity: 'auto' },
+      { quality: 'auto', fetch_format: 'auto' }
+    ],
+    ...options
+  });
+};
+
+// 13. Holiday Thumbnail Upload (for list views)
+const uploadHolidayThumbnail = async (buffer, options = {}) => {
+  return uploadToCloudinary(buffer, 'holiday', {
+    folder: options.folder || 'holiday_thumbnails',
+    resource_type: 'image',
+    transformation: [
+      { width: 400, height: 300, crop: 'fill', gravity: 'auto' },
+      { quality: 'auto', fetch_format: 'auto' }
+    ],
+    ...options
+  });
+};
+
+
 // --------------------
 // Helper Functions
 // --------------------
@@ -559,6 +594,13 @@ const messageAttachmentUpload = multer({
   limits: { fileSize: uploadConfigs.messageAttachment.maxSize }
 });
 
+// Add after other multer instances
+const holidayUpload = multer({
+  storage,
+  fileFilter: createFileFilter('holiday'),
+  limits: { fileSize: uploadConfigs.holiday.maxSize }
+});
+
 // Single file upload for any type (dynamic based on type field)
 const singleUpload = multer({
   storage,
@@ -588,8 +630,7 @@ const deleteRfidImage = async (publicId) => {
 // Export
 // --------------------
 module.exports = {
-  // Multer instances
-  upload,               // general multer instance
+  upload,
   profileUpload,
   badgeUpload,
   chatUpload,
@@ -600,8 +641,6 @@ module.exports = {
   messageAttachmentUpload,
   singleUpload,
   multipleUpload,
-
-  // Upload functions
   uploadToCloudinary,
   uploadExpenseFile,
   uploadChatAttachment,
@@ -620,5 +659,8 @@ module.exports = {
   uploadRfidImage,
   uploadConfigs,
   deleteRfidImage,
-  cloudinary
+  cloudinary,
+  holidayUpload,
+  uploadHolidayImage,
+  uploadHolidayThumbnail,
 };

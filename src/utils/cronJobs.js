@@ -2,22 +2,15 @@
 const cron = require('node-cron');
 const moment = require('moment-timezone');
 const User = require('../models/User');
-const Attendance = require('../models/Attendance');
-const Holiday = require('../models/Holiday');
 const Leave = require('../models/Leave');
 const { updateCronRun, getLastCronRun } = require('./cronLogger');
-const testNotification = require('./testNotification');
-const { notifyMorningPunchIn, notifyMorningPunchOut, notifyEveningPunchIn, notifyEveningPunchOut } = require('./attendanceNotifications');
 const { sendCelebrationNotifications, scheduleCelebrationNotifications } = require('./celebrationScheduler');
+const { notifyMorningPunchIn, notifyEveningPunchOut } = require('./attendanceNotifications');
+const { ADMIN_ROLES } = require('../constants/roles');
 
-/**
- * Check if today is a holiday
- */
-async function isTodayHoliday() {
-  const today = moment().tz('Asia/Kolkata').startOf('day').toDate();
-  const holiday = await Holiday.findOne({ date: today });
-  return !!holiday;
-}
+// ───────────────────────────────────────────────
+// Helpers
+// ───────────────────────────────────────────────
 
 /**
  * Check if employee is on approved leave today
@@ -28,45 +21,33 @@ async function isEmployeeOnLeave(employeeId) {
   const leave = await Leave.findOne({
     employee: employeeId,
     startDate: { $lte: today },
-    endDate: { $gte: today },
-    status: 'approved',
+    endDate:   { $gte: today },
+    status:    'approved',
   });
 
   return !!leave;
 }
 
 /**
- * Fetch employees who need punch-in/punch-out notification
+ * Fetch employees who need morning punch-in notification
+ * (active, non-admin, not on leave, no check-in today)
  */
-async function getEmployeesToNotify(type) {
+async function getEmployeesForMorningPunchIn() {
+  const Attendance = require('../models/Attendance');
   const today = moment().tz('Asia/Kolkata').startOf('day').toDate();
-  const isHoliday = await isTodayHoliday();
 
-  if (isHoliday) {
-    return [];
-  }
+  const employees = await User.find({
+    isActive: true,
+    role: { $nin: ADMIN_ROLES },
+  }).select('_id');
 
-  const employees = await User.find({ isActive: true, role: 'user' }).select('_id');
   const toNotify = [];
-
   for (const emp of employees) {
-    const onLeave = await isEmployeeOnLeave(emp._id);
-    if (onLeave) continue;
+    if (await isEmployeeOnLeave(emp._id)) continue;
 
-    let attendance = await Attendance.findOne({
-      employee: emp._id,
-      date: today
-    });
+    const attendance = await Attendance.findOne({ employee: emp._id, date: today });
 
-    if (!attendance) attendance = {};
-
-    if (type === 'morning_in' && (!attendance.checkIn || !attendance.checkIn.time)) {
-      toNotify.push(emp._id);
-    } else if (type === 'morning_out' && attendance.checkIn?.time && (!attendance.checkOut || !attendance.checkOut.time)) {
-      toNotify.push(emp._id);
-    } else if (type === 'evening_in' && attendance.checkOut?.time && (!attendance.eveningCheckIn || !attendance.eveningCheckIn.time)) {
-      toNotify.push(emp._id);
-    } else if (type === 'evening_out' && attendance.eveningCheckIn?.time && (!attendance.eveningCheckOut || !attendance.eveningCheckOut.time)) {
+    if (!attendance || !attendance.checkIn || !attendance.checkIn.time) {
       toNotify.push(emp._id);
     }
   }
@@ -74,155 +55,110 @@ async function getEmployeesToNotify(type) {
   return toNotify;
 }
 
-// Store the actual task functions for manual execution
+/**
+ * Fetch employees who need evening punch-out notification
+ * (already evening checked-in but not checked-out)
+ */
+async function getEmployeesForEveningPunchOut() {
+  const Attendance = require('../models/Attendance');
+  const today = moment().tz('Asia/Kolkata').startOf('day').toDate();
+
+  const employees = await User.find({
+    isActive: true,
+    role: { $nin: ADMIN_ROLES },
+  }).select('_id');
+
+  const toNotify = [];
+  for (const emp of employees) {
+    if (await isEmployeeOnLeave(emp._id)) continue;
+
+    const attendance = await Attendance.findOne({ employee: emp._id, date: today });
+
+    if (
+      attendance &&
+      attendance.eveningCheckIn?.time &&
+      (!attendance.eveningCheckOut || !attendance.eveningCheckOut.time)
+    ) {
+      toNotify.push(emp._id);
+    }
+  }
+
+  return toNotify;
+}
+
+// ───────────────────────────────────────────────
+// Task Definitions
+// ───────────────────────────────────────────────
 const cronTasks = {
-  sendTestNotification: async () => {
-    try {
-      await updateCronRun('sendTestNotification');
-      const result = await testNotification();
-      return result;
-    } catch (error) {
-      console.error('❌ Cron sendTestNotification failed:', error);
-      return { success: false, error: error.message };
-    }
-  },
-
-  autoCheckoutEmployees: async () => {
-    try {
-      await updateCronRun('autoCheckoutEmployees');
-
-      const istNow = moment().tz('Asia/Kolkata');
-      const isHoliday = await isTodayHoliday();
-
-      if (isHoliday) {
-        return { success: true, count: 0, message: 'Holiday - no auto checkout' };
-      }
-
-      const todayStart = istNow.clone().startOf('day').toDate();
-      const todayEnd = istNow.clone().endOf('day').toDate();
-
-      const pendingAttendances = await Attendance.find({
-        date: { $gte: todayStart, $lte: todayEnd },
-        'checkIn.time': { $exists: true },
-        'checkOut.time': { $exists: false },
-        status: 'present',
-      });
-
-      if (!pendingAttendances.length) {
-        return { success: true, count: 0, message: 'No pending checkouts' };
-      }
-
-      const checkOutTime = istNow.toDate();
-
-      let successCount = 0;
-      for (const attendance of pendingAttendances) {
-        try {
-          const checkInTime = moment(attendance.checkIn.time).tz('Asia/Kolkata').toDate();
-          const totalHours = ((checkOutTime - checkInTime) / (1000 * 60 * 60)).toFixed(2);
-
-          attendance.checkOut = {
-            time: checkOutTime,
-            location: {
-              latitude: null,
-              longitude: null,
-              address: 'Auto Checked Out by System'
-            },
-            deviceInfo: { name: 'System', type: 'Auto' },
-          };
-          attendance.workHours = parseFloat(totalHours);
-          attendance.missedCheckout = true;
-
-          await attendance.save();
-          successCount++;
-        } catch (err) {
-          console.error(`❌ Failed to checkout ${attendance.employee}:`, err.message);
-        }
-      }
-
-      return {
-        success: true,
-        count: successCount,
-        total: pendingAttendances.length,
-        message: `Auto checkout complete for ${successCount}/${pendingAttendances.length} employee(s)`
-      };
-    } catch (error) {
-      console.error('❌ Error in auto checkout cron:', error);
-      return { success: false, error: error.message };
-    }
-  },
-
-  markAbsentEmployees: async () => {
-    try {
-      await updateCronRun('markAbsentEmployees');
-
-      const istNow = moment().tz('Asia/Kolkata');
-      const todayStart = istNow.clone().startOf('day').toDate();
-      const todayEnd = istNow.clone().endOf('day').toDate();
-
-      const isHoliday = await isTodayHoliday();
-
-      if (isHoliday) {
-        return { success: true, count: 0, message: 'Holiday - no absent marking' };
-      }
-
-      const employees = await User.find({ isActive: true });
-      let markedCount = 0;
-
-      for (const employee of employees) {
-        const onLeave = await isEmployeeOnLeave(employee._id);
-        if (onLeave) continue;
-
-        const attendance = await Attendance.findOne({
-          employee: employee._id,
-          date: { $gte: todayStart, $lte: todayEnd }
-        });
-
-        if (!attendance) {
-          await Attendance.create({
-            employee: employee._id,
-            date: todayStart,
-            status: 'absent',
-          });
-          markedCount++;
-        }
-      }
-
-      return { success: true, count: markedCount };
-    } catch (error) {
-      console.error('❌ Error marking absent employees:', error);
-      return { success: false, error: error.message };
-    }
-  },
-
+  /**
+   * Reset leave balances for all eligible employees.
+   * Employees still in probation remain at ZERO.
+   */
   resetLeaveBalance: async () => {
     try {
       await updateCronRun('resetLeaveBalance');
 
-      const result = await User.updateMany(
-        { isActive: true },
+      // 1. Employees past probation → full quota
+      const fullQuotaResult = await User.updateMany(
+        {
+          isActive: true,
+          role: { $nin: ADMIN_ROLES },
+          isProbationCompleted: true,
+        },
         {
           $set: {
             'leaveBalance.casual': 12,
-            'leaveBalance.sick': 10,
+            'leaveBalance.sick':   10,
             'leaveBalance.earned': 15,
+            'leaveBalance.combo':  0,
+            'leaveBalance.unpaid': 0,
+            leaveCreditedAt: new Date(),
+            leaveCreditType: 'annual-reset',
           },
         }
       );
 
-      return { success: true, count: result.modifiedCount };
+      // 2. Employees still in probation → keep at zero
+      const probationResult = await User.updateMany(
+        {
+          isActive: true,
+          role: { $nin: ADMIN_ROLES },
+          isProbationCompleted: false,
+        },
+        {
+          $set: {
+            'leaveBalance.casual': 0,
+            'leaveBalance.sick':   0,
+            'leaveBalance.earned': 0,
+            'leaveBalance.combo':  0,
+            'leaveBalance.unpaid': 0,
+            leaveCreditType: 'none',
+            leaveCreditedAt: null,
+          },
+        }
+      );
+
+      return {
+        success: true,
+        credited: fullQuotaResult.modifiedCount,
+        probationHold: probationResult.modifiedCount,
+      };
     } catch (error) {
       console.error('❌ Error resetting leave balance:', error);
       return { success: false, error: error.message };
     }
   },
 
+  /**
+   * Send birthday wishes (data fetch + hook for email/push).
+   */
   sendBirthdayWishes: async () => {
     try {
       await updateCronRun('sendBirthdayWishes');
 
       const today = moment().tz('Asia/Kolkata');
       const month = today.month() + 1;
-      const day = today.date();
+      const day   = today.date();
 
       const employees = await User.find({
         isActive: true,
@@ -238,7 +174,7 @@ const cronTasks = {
         return { success: true, count: 0, message: 'No birthdays today' };
       }
 
-      // Optionally: await emailService.sendBirthdayWish(emp);
+      // TODO: await emailService.sendBirthdayWish(emp);
 
       return { success: true, count: employees.length };
     } catch (error) {
@@ -247,6 +183,9 @@ const cronTasks = {
     }
   },
 
+  /**
+   * Generate monthly attendance report.
+   */
   generateMonthlyReport: async () => {
     try {
       await updateCronRun('generateMonthlyReport');
@@ -260,11 +199,14 @@ const cronTasks = {
     }
   },
 
+  /**
+   * Morning punch-in reminder (9:00 AM IST).
+   */
   notifyMorningPunchIn: async () => {
     try {
       await updateCronRun('notifyMorningPunchIn');
 
-      const employees = await getEmployeesToNotify('morning_in');
+      const employees = await getEmployeesForMorningPunchIn();
 
       if (employees.length === 0) {
         return { success: true, count: 0 };
@@ -275,13 +217,13 @@ const cronTasks = {
       );
 
       const successful = results.filter(r => r.status === 'fulfilled').length;
-      const failed = results.filter(r => r.status === 'rejected').length;
+      const failed     = results.filter(r => r.status === 'rejected').length;
 
       return {
         success: true,
         count: employees.length,
         successful,
-        failed
+        failed,
       };
     } catch (error) {
       console.error('❌ Error sending morning punch-in notifications:', error);
@@ -289,69 +231,14 @@ const cronTasks = {
     }
   },
 
-  notifyMorningPunchOut: async () => {
-    try {
-      await updateCronRun('notifyMorningPunchOut');
-
-      const employees = await getEmployeesToNotify('morning_out');
-
-      if (employees.length === 0) {
-        return { success: true, count: 0 };
-      }
-
-      const results = await Promise.allSettled(
-        employees.map(id => notifyMorningPunchOut(id))
-      );
-
-      const successful = results.filter(r => r.status === 'fulfilled').length;
-      const failed = results.filter(r => r.status === 'rejected').length;
-
-      return {
-        success: true,
-        count: employees.length,
-        successful,
-        failed
-      };
-    } catch (error) {
-      console.error('❌ Error sending morning punch-out notifications:', error);
-      return { success: false, error: error.message };
-    }
-  },
-
-  notifyEveningPunchIn: async () => {
-    try {
-      await updateCronRun('notifyEveningPunchIn');
-
-      const employees = await getEmployeesToNotify('evening_in');
-
-      if (employees.length === 0) {
-        return { success: true, count: 0 };
-      }
-
-      const results = await Promise.allSettled(
-        employees.map(id => notifyEveningPunchIn(id))
-      );
-
-      const successful = results.filter(r => r.status === 'fulfilled').length;
-      const failed = results.filter(r => r.status === 'rejected').length;
-
-      return {
-        success: true,
-        count: employees.length,
-        successful,
-        failed
-      };
-    } catch (error) {
-      console.error('❌ Error sending evening punch-in notifications:', error);
-      return { success: false, error: error.message };
-    }
-  },
-
+  /**
+   * Evening punch-out reminder (6:00 PM IST).
+   */
   notifyEveningPunchOut: async () => {
     try {
       await updateCronRun('notifyEveningPunchOut');
 
-      const employees = await getEmployeesToNotify('evening_out');
+      const employees = await getEmployeesForEveningPunchOut();
 
       if (employees.length === 0) {
         return { success: true, count: 0 };
@@ -362,13 +249,13 @@ const cronTasks = {
       );
 
       const successful = results.filter(r => r.status === 'fulfilled').length;
-      const failed = results.filter(r => r.status === 'rejected').length;
+      const failed     = results.filter(r => r.status === 'rejected').length;
 
       return {
         success: true,
         count: employees.length,
         successful,
-        failed
+        failed,
       };
     } catch (error) {
       console.error('❌ Error sending evening punch-out notifications:', error);
@@ -376,6 +263,9 @@ const cronTasks = {
     }
   },
 
+  /**
+   * Celebration notifications (birthdays + work anniversaries).
+   */
   sendCelebrationNotifications: async () => {
     try {
       await updateCronRun('sendCelebrationNotifications');
@@ -388,132 +278,57 @@ const cronTasks = {
   },
 };
 
-/* ───────────────────────────────────────────────
-   🕗 AUTO CHECK-OUT (9:00 PM IST)
-─────────────────────────────────────────────── */
-exports.autoCheckoutEmployees = cron.schedule(
-  '0 21 * * *',
-  cronTasks.autoCheckoutEmployees,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
-);
+// ───────────────────────────────────────────────
+// Cron Schedules
+// ───────────────────────────────────────────────
 
-/* ───────────────────────────────────────────────
-   🚫 MARK ABSENT EMPLOYEES (11:59 PM IST)
-─────────────────────────────────────────────── */
-exports.markAbsentEmployees = cron.schedule(
-  '59 23 * * *',
-  cronTasks.markAbsentEmployees,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
-);
-
-/* ───────────────────────────────────────────────
-   🔄 RESET LEAVE BALANCE (Jan 1, 12:00 AM)
-─────────────────────────────────────────────── */
+/* 🔄 RESET LEAVE BALANCE — Jan 1, 12:00 AM IST */
 exports.resetLeaveBalance = cron.schedule(
   '0 0 1 1 *',
   cronTasks.resetLeaveBalance,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
+  { scheduled: true, timezone: 'Asia/Kolkata' }
 );
 
-/* ───────────────────────────────────────────────
-   🎂 SEND BIRTHDAY WISHES (9:00 AM IST)
-─────────────────────────────────────────────── */
+/* 🎂 SEND BIRTHDAY WISHES — 9:00 AM IST daily */
 exports.sendBirthdayWishes = cron.schedule(
   '0 9 * * *',
   cronTasks.sendBirthdayWishes,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
+  { scheduled: true, timezone: 'Asia/Kolkata' }
 );
 
-/* ───────────────────────────────────────────────
-   📊 GENERATE MONTHLY ATTENDANCE REPORT
-─────────────────────────────────────────────── */
+/* 📊 GENERATE MONTHLY ATTENDANCE REPORT — 1st of every month, 1:00 AM IST */
 exports.generateMonthlyReport = cron.schedule(
   '0 1 1 * *',
   cronTasks.generateMonthlyReport,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
+  { scheduled: true, timezone: 'Asia/Kolkata' }
 );
 
-/* ───────────────────────────────────────────────
-   ⏰ ATTENDANCE NOTIFICATIONS
-─────────────────────────────────────────────── */
-
-// Morning Punch-In: 9:00 AM
+/* ⏰ MORNING PUNCH-IN REMINDER — 9:00 AM IST */
 exports.notifyMorningPunchIn = cron.schedule(
   '0 9 * * *',
   cronTasks.notifyMorningPunchIn,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
+  { scheduled: true, timezone: 'Asia/Kolkata' }
 );
 
-// Morning Punch-Out: 1:00 PM
-exports.notifyMorningPunchOut = cron.schedule(
-  '0 13 * * *',
-  cronTasks.notifyMorningPunchOut,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
-);
-
-// Evening Punch-In: 2:00 PM
-exports.notifyEveningPunchIn = cron.schedule(
-  '0 14 * * *',
-  cronTasks.notifyEveningPunchIn,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
-);
-
-// Evening Punch-Out: 6:00 PM
+/* ⏰ EVENING PUNCH-OUT REMINDER — 6:00 PM IST */
 exports.notifyEveningPunchOut = cron.schedule(
   '0 18 * * *',
   cronTasks.notifyEveningPunchOut,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
+  { scheduled: true, timezone: 'Asia/Kolkata' }
 );
 
-// Celebration Notifications: 9:00 AM
+/* 🎉 CELEBRATION NOTIFICATIONS — 9:00 AM IST */
 exports.sendCelebrationNotifications = cron.schedule(
   '0 9 * * *',
   cronTasks.sendCelebrationNotifications,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
+  { scheduled: true, timezone: 'Asia/Kolkata' }
 );
 
-exports.sendTestNotification = cron.schedule(
-  '38 14 * * *',
-  cronTasks.sendTestNotification,
-  {
-    scheduled: true,
-    timezone: 'Asia/Kolkata'
-  }
-);
+// ───────────────────────────────────────────────
+// Lifecycle
+// ───────────────────────────────────────────────
 
-/* ───────────────────────────────────────────────
-   🚀 START ALL CRON JOBS
-─────────────────────────────────────────────── */
+/* 🚀 START ALL CRON JOBS */
 exports.startCronJobs = async () => {
   try {
     if (scheduleCelebrationNotifications) {
@@ -521,62 +336,45 @@ exports.startCronJobs = async () => {
     }
 
     const jobs = [
-      exports.autoCheckoutEmployees,
-      exports.markAbsentEmployees,
       exports.resetLeaveBalance,
       exports.sendBirthdayWishes,
       exports.generateMonthlyReport,
       exports.notifyMorningPunchIn,
-      exports.notifyMorningPunchOut,
-      exports.notifyEveningPunchIn,
       exports.notifyEveningPunchOut,
       exports.sendCelebrationNotifications,
-      exports.sendTestNotification,
     ];
 
     jobs.forEach(job => job.start());
+    console.log('✅ Cron jobs started (6 active)');
   } catch (error) {
     console.error('❌ Failed to start cron jobs:', error);
   }
 };
 
-/* ───────────────────────────────────────────────
-   ⏸️ STOP ALL CRON JOBS (for testing/shutdown)
-─────────────────────────────────────────────── */
+/* ⏸️ STOP ALL CRON JOBS */
 exports.stopCronJobs = () => {
   const jobs = [
-    exports.autoCheckoutEmployees,
-    exports.markAbsentEmployees,
     exports.resetLeaveBalance,
     exports.sendBirthdayWishes,
     exports.generateMonthlyReport,
     exports.notifyMorningPunchIn,
-    exports.notifyMorningPunchOut,
-    exports.notifyEveningPunchIn,
     exports.notifyEveningPunchOut,
     exports.sendCelebrationNotifications,
-    exports.sendTestNotification,
   ];
 
   jobs.forEach(job => job.stop());
+  console.log('🛑 Cron jobs stopped');
 };
 
-/* ───────────────────────────────────────────────
-   🔍 GET CRON JOB STATUS
-─────────────────────────────────────────────── */
+/* 🔍 GET CRON JOB STATUS */
 exports.getCronStatus = () => {
   const jobs = [
-    { name: 'autoCheckoutEmployees', task: exports.autoCheckoutEmployees },
-    { name: 'markAbsentEmployees', task: exports.markAbsentEmployees },
-    { name: 'resetLeaveBalance', task: exports.resetLeaveBalance },
-    { name: 'sendBirthdayWishes', task: exports.sendBirthdayWishes },
-    { name: 'generateMonthlyReport', task: exports.generateMonthlyReport },
-    { name: 'notifyMorningPunchIn', task: exports.notifyMorningPunchIn },
-    { name: 'notifyMorningPunchOut', task: exports.notifyMorningPunchOut },
-    { name: 'notifyEveningPunchIn', task: exports.notifyEveningPunchIn },
-    { name: 'notifyEveningPunchOut', task: exports.notifyEveningPunchOut },
+    { name: 'resetLeaveBalance',            task: exports.resetLeaveBalance },
+    { name: 'sendBirthdayWishes',           task: exports.sendBirthdayWishes },
+    { name: 'generateMonthlyReport',        task: exports.generateMonthlyReport },
+    { name: 'notifyMorningPunchIn',         task: exports.notifyMorningPunchIn },
+    { name: 'notifyEveningPunchOut',        task: exports.notifyEveningPunchOut },
     { name: 'sendCelebrationNotifications', task: exports.sendCelebrationNotifications },
-    { name: 'sendTestNotification', task: exports.sendTestNotification },
   ];
 
   return jobs.map(job => ({

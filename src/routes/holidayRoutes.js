@@ -5,7 +5,7 @@ const { protect, authorize } = require('../middleware/auth');
 const { ACCESS_ROLES } = require('../constants/roles');
 const validateObjectId = require('../middleware/validateObjectId');
 const validateHolidayInput = require('../middleware/validateHolidayInput');
-const { bulkUpload } = require('../middleware/upload');
+const { bulkUpload, holidayUpload } = require('../middleware/upload'); // ✅ Added holidayUpload
 
 const {
   addHoliday,
@@ -16,12 +16,17 @@ const {
   getHolidaysByYear,
   getUpcomingHolidays,
   getHolidaysByType,
-  getHolidaysByCategory,          // ✅ NEW
-  getRestrictedHolidaySummary,    // ✅ NEW
+  getHolidaysByCategory,
+  getRestrictedHolidaySummary,
   bulkImportHolidays,
   exportHolidays,
   getHolidayStats,
-  permanentDeleteHoliday
+  permanentDeleteHoliday,
+  // ✅ NEW: Image controllers
+  uploadHolidayImage,
+  deleteHolidayImage,
+  updateHolidayImage,
+  getHolidayImage
 } = require('../controllers/holidayController');
 
 router.use(protect);
@@ -31,9 +36,39 @@ router.get('/', getHolidays);
 router.get('/year/:year', getHolidaysByYear);
 router.get('/upcoming', getUpcomingHolidays);
 router.get('/type/:type', getHolidaysByType);
-router.get('/category/:category', getHolidaysByCategory);              // ✅ NEW
-router.get('/restricted/summary', getRestrictedHolidaySummary);        // ✅ NEW
+router.get('/category/:category', getHolidaysByCategory);
+router.get('/restricted/summary', getRestrictedHolidaySummary);
 router.get('/:id', validateObjectId, getHolidayById);
+
+// ========== HOLIDAY IMAGE ROUTES ==========
+// ✅ NEW: Get holiday image
+router.get('/:id/image', validateObjectId, getHolidayImage);
+
+// ✅ NEW: Upload holiday image (HR & SUPERADMIN)
+router.post(
+  '/:id/image',
+  authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN),
+  validateObjectId,
+  holidayUpload.single('image'),
+  uploadHolidayImage
+);
+
+// ✅ NEW: Update holiday image (replace) (HR & SUPERADMIN)
+router.put(
+  '/:id/image',
+  authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN),
+  validateObjectId,
+  holidayUpload.single('image'),
+  updateHolidayImage
+);
+
+// ✅ NEW: Delete holiday image (HR & SUPERADMIN)
+router.delete(
+  '/:id/image',
+  authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN),
+  validateObjectId,
+  deleteHolidayImage
+);
 
 // ========== HR & SUPERADMIN ACCESS ==========
 router.post('/', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), validateHolidayInput, addHoliday);

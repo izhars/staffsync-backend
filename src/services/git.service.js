@@ -9,104 +9,133 @@ const BRANCH   = process.env.GITHUB_BRANCH || process.env.BRANCH || 'main';
 
 // ─── Path resolution (Windows + Linux safe) ────────────────────────────────
 const RAW_DIR = process.env.GITHUB_PROJECT_DIR || process.env.PROJECT_DIR || '.';
-
-// Normalize: convert backslashes to forward slashes, then resolve
 const normalized = RAW_DIR.replace(/\\/g, '/');
 const PROJECT_DIR = path.isAbsolute(normalized)
   ? path.normalize(normalized)
   : path.resolve(__dirname, '..', normalized);
 
-// ─── Validate on load ──────────────────────────────────────────────────────
 if (!fs.existsSync(PROJECT_DIR)) {
-  console.error(`❌ GITHUB_PROJECT_DIR does not exist: "${PROJECT_DIR}"`);
-  console.error(`   RAW value from .env: "${RAW_DIR}"`);
+  console.error(`❌ GITHUB_PROJECT_DIR does not exist: "${PROJECT_DIR}" (raw: "${RAW_DIR}")`);
 } else {
   console.log(`✅ GitHub PROJECT_DIR resolved: ${PROJECT_DIR}`);
 }
 
 function validateProjectDir() {
   if (!fs.existsSync(PROJECT_DIR)) {
-    throw new Error(
-      `GITHUB_PROJECT_DIR does not exist: "${PROJECT_DIR}". ` +
-      `Check your .env (current value: "${RAW_DIR}").`
-    );
+    throw new Error(`GITHUB_PROJECT_DIR does not exist: "${PROJECT_DIR}" (raw: "${RAW_DIR}")`);
   }
   if (!fs.statSync(PROJECT_DIR).isDirectory()) {
     throw new Error(`GITHUB_PROJECT_DIR is not a directory: "${PROJECT_DIR}"`);
   }
 }
 
-function getAuthUrl() {
+function validateEnv() {
   if (!TOKEN || !REPO_URL) {
     throw new Error('GITHUB_TOKEN or GITHUB_REPO_URL missing in .env');
   }
+}
+
+function getAuthUrl() {
+  validateEnv();
   return REPO_URL.replace('https://', `https://${TOKEN}@`);
 }
 
+/** Strip token from any error message before it leaves this module */
+function sanitizeError(err) {
+  let msg = err?.message || String(err);
+  if (TOKEN) msg = msg.split(TOKEN).join('***');
+  return msg;
+}
 
 /**
- * Push entire project to GitHub
+ * Push entire project to GitHub.
+ * Recovers remote history on a fresh/lost .git dir instead of nuking it.
  */
 async function pushToGithub(message = '') {
+  validateProjectDir();
+  validateEnv();
+
   const git = simpleGit(PROJECT_DIR);
-
   const isRepo = await git.checkIsRepo();
-  if (!isRepo) {
-    await git.init();
-    await git.addRemote('origin', getAuthUrl());
-  } else {
-    // Ensure remote has token
-    const remotes = await git.getRemotes(true);
-    const origin = remotes.find(r => r.name === 'origin');
-    if (!origin || !origin.refs.push.includes('@')) {
-      await git.removeRemote('origin').catch(() => {});
-      await git.addRemote('origin', getAuthUrl());
-    }
-  }
-
-  await git.add('./*');
 
   try {
-    await git.commit(message || `Auto push ${new Date().toISOString()}`);
-  } catch (e) {
-    // nothing to commit — ignore
+    if (!isRepo) {
+      await git.init();
+      await git.checkoutLocalBranch(BRANCH);
+      await git.addRemote('origin', getAuthUrl());
+
+      // Try to reclaim existing remote history as our base, so a lost
+      // local .git dir doesn't force-overwrite prior commits on GitHub.
+      try {
+        await git.fetch('origin', BRANCH);
+        await git.reset(['--soft', `origin/${BRANCH}`]);
+      } catch {
+        console.warn(`⚠️ No existing remote branch "${BRANCH}" found — starting fresh history.`);
+      }
+    } else {
+      // Ensure remote always carries a fresh token
+      const remotes = await git.getRemotes(true);
+      if (remotes.some(r => r.name === 'origin')) {
+        await git.removeRemote('origin').catch(() => {});
+      }
+      await git.addRemote('origin', getAuthUrl());
+    }
+
+    await git.add('.');
+
+    try {
+      await git.commit(message || `Auto push ${new Date().toISOString()}`);
+    } catch {
+      // nothing to commit — fine, proceed to push
+    }
+
+    const pushResult = await git.push('origin', BRANCH, ['--force-with-lease']);
+
+    return {
+      branch: BRANCH,
+      repo: REPO_URL,
+      pushedAt: new Date().toISOString(),
+      result: pushResult,
+    };
+  } catch (err) {
+    throw new Error(sanitizeError(err));
   }
-
-  const pushResult = await git.push('origin', BRANCH, ['--force']);
-
-  return {
-    branch: BRANCH,
-    repo: REPO_URL,
-    pushedAt: new Date().toISOString(),
-    result: pushResult,
-  };
 }
 
 /**
  * Get current repo status
  */
 async function getRepoStatus() {
+  validateProjectDir();
+
   const git = simpleGit(PROJECT_DIR);
   const isRepo = await git.checkIsRepo();
   if (!isRepo) {
     return { initialized: false };
   }
-  const status = await git.status();
-  const log = await git.log({ maxCount: 5 });
-  return {
-    initialized: true,
-    branch: status.current,
-    modified: status.modified,
-    not_added: status.not_added,
-    ahead: status.ahead,
-    behind: status.behind,
-    recentCommits: log.all.map(c => ({
-      hash: c.hash.slice(0, 7),
-      message: c.message,
-      date: c.date,
-      author: c.author_name,
-    })),
-  };
+
+  try {
+    const status = await git.status();
+    const log = await git.log({ maxCount: 5 }).catch(() => ({ all: [] })); // empty repo has no log
+
+    return {
+      initialized: true,
+      branch: status.current,
+      modified: status.modified,
+      not_added: status.not_added,
+      ahead: status.ahead,
+      behind: status.behind,
+      repo: REPO_URL,
+      recentCommits: log.all.map(c => ({
+        hash: c.hash.slice(0, 7),
+        message: c.message,
+        date: c.date,
+        author: c.author_name,
+      })),
+    };
+  } catch (err) {
+    throw new Error(sanitizeError(err));
+  }
 }
 
 module.exports = { pushToGithub, getRepoStatus };

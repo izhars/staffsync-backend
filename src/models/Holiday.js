@@ -49,14 +49,12 @@ const HolidaySchema = new mongoose.Schema({
   },
   
   // ✅ NEW: For restricted holidays - max number an employee can take
-  // Only relevant when category === 'Restricted'
   maxAllowed: {
     type: Number,
     default: null,
     min: [1, 'maxAllowed must be at least 1'],
     validate: {
       validator: function(v) {
-        // Only validate if category is Restricted
         if (this.category === 'Restricted') {
           return v === null || (Number.isInteger(v) && v >= 1);
         }
@@ -69,7 +67,43 @@ const HolidaySchema = new mongoose.Schema({
   // ✅ NEW: For restricted holidays - which departments/roles can opt in
   applicableTo: {
     type: [String],
-    default: ['all'] // 'all' or specific roles like ['hr', 'employee']
+    default: ['all']
+  },
+  
+  // ✅ NEW: Holiday image
+  image: {
+    url: {
+      type: String,
+      default: null
+    },
+    publicId: {
+      type: String,
+      default: null
+    },
+    format: {
+      type: String,
+      default: null
+    },
+    bytes: {
+      type: Number,
+      default: null
+    },
+    width: {
+      type: Number,
+      default: null
+    },
+    height: {
+      type: Number,
+      default: null
+    },
+    originalFilename: {
+      type: String,
+      default: null
+    },
+    uploadedAt: {
+      type: Date,
+      default: null
+    }
   },
   
   isActive: {
@@ -77,7 +111,6 @@ const HolidaySchema = new mongoose.Schema({
     default: true
   },
   
-  // ✅ NEW: Track who created it
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -91,8 +124,9 @@ const HolidaySchema = new mongoose.Schema({
 // Indexes for better query performance
 HolidaySchema.index({ date: 1 });
 HolidaySchema.index({ type: 1 });
-HolidaySchema.index({ category: 1 }); // ✅ NEW
-HolidaySchema.index({ category: 1, date: 1 }); // ✅ NEW compound
+HolidaySchema.index({ category: 1 });
+HolidaySchema.index({ category: 1, date: 1 });
+HolidaySchema.index({ 'image.publicId': 1 }); // ✅ NEW: Index for image queries
 
 // Pre-save hook to set weekday
 HolidaySchema.pre('save', function(next) {
@@ -104,12 +138,22 @@ HolidaySchema.pre('save', function(next) {
   next();
 });
 
-// ✅ NEW: Virtual to check if it's a mandatory holiday
+// ✅ NEW: Virtual to check if holiday has an image
+HolidaySchema.virtual('hasImage').get(function() {
+  return !!(this.image && this.image.url);
+});
+
+// ✅ NEW: Virtual to get image thumbnail URL
+HolidaySchema.virtual('imageThumbnail').get(function() {
+  if (!this.image || !this.image.url) return null;
+  // Cloudinary transformation for thumbnail
+  return this.image.url.replace('/upload/', '/upload/w_200,h_200,c_fill,q_auto,f_auto/');
+});
+
 HolidaySchema.virtual('isMandatory').get(function() {
   return this.category === 'Mandatory';
 });
 
-// ✅ NEW: Virtual to check if it's a restricted holiday
 HolidaySchema.virtual('isRestricted').get(function() {
   return this.category === 'Restricted';
 });

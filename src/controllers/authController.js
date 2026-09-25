@@ -2,6 +2,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Department = require('../models/Department');
+const Shift = require('../models/Shift');
 const ProfileLog = require('../models/ProfileLog'); // keep your existing model
 const mongoose = require('mongoose');
 const cloudinary = require('../config/cloudinary');
@@ -33,9 +34,10 @@ exports.register = async (req, res) => {
   try {
     const {
       employeeId, email, password, firstName, lastName,
-      role: requestedRole,      // ACCESS ROLE
-      department,               // department name OR ObjectId
-      designation,              // DESIGNATION (job title)
+      role: requestedRole,
+      department,
+      designation,
+      shift,
       dateOfJoining, employmentType,
       reportingManager, salary, bankDetails, phone, gender,
       dateOfBirth, maritalStatus, marriageAnniversary,
@@ -134,21 +136,34 @@ exports.register = async (req, res) => {
       if (manager) reportingManagerId = manager._id;
     }
 
-    // ── 7. Probation window ──────────────────────────────────────
+    // ── 7. Resolve & validate Shift ──────────────────────────────
+    let shiftId = null;
+    if (shift && mongoose.Types.ObjectId.isValid(shift)) {
+      const shiftDoc = await Shift.findOne({ _id: shift, isActive: true });
+      if (!shiftDoc) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid or inactive shift',
+        });
+      }
+      shiftId = shiftDoc._id;
+    }
+
+    // ── 8. Probation window ──────────────────────────────────────
     const probationStart = dateOfJoining ? new Date(dateOfJoining) : new Date();
     const probationEnd = new Date(probationStart);
     probationEnd.setMonth(probationEnd.getMonth() + 6);
 
-    // ── 8. Build user payload ────────────────────────────────────
+    // ── 9. Build user payload ────────────────────────────────────
     const userData = {
       employeeId: employeeId.trim().toUpperCase(),
       email: email.toLowerCase().trim(),
       password,
       firstName: firstName.trim(),
       lastName: lastName.trim(),
-      role: assignedRole,               // ← ACCESS ROLE
-      department: deptDoc._id,          // ← DEPARTMENT
-      designation: designation.trim(),  // ← DESIGNATION (job title)
+      role: assignedRole,
+      department: deptDoc._id,
+      designation: designation.trim(),
       dateOfJoining: dateOfJoining ? new Date(dateOfJoining) : new Date(),
       employmentType: employmentType || 'full-time',
       reportingManager: reportingManagerId,
@@ -181,12 +196,17 @@ exports.register = async (req, res) => {
       probationEndDate: probationEnd,
       isProbationCompleted: false,
       leaveBalance: { casual: 0, sick: 0, earned: 0, unpaid: 0 },
+
+      // ✅ SHIFT ASSIGNMENT — persisted to DB
+      shift: shiftId,
+      shiftAssignedAt: shiftId ? new Date() : null,
+      shiftAssignedBy: shiftId ? req.user._id : null,
     };
 
     const user = new User(userData);
     await user.save();
 
-    // ── 9. Welcome email (non-blocking) ─────────────────────────
+    // ── 10. Welcome email (non-blocking) ────────────────────────
     try {
       if ([ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN].includes(creatorRole)) {
         await emailService.sendWelcomeEmail(user, password);
@@ -195,7 +215,7 @@ exports.register = async (req, res) => {
       console.error('Failed to send welcome email:', emailError);
     }
 
-    // ── 10. Salary calculation ──────────────────────────────────
+    // ── 11. Salary calculation ──────────────────────────────────
     try {
       if (typeof user.calculateNetSalary === 'function') {
         user.calculateNetSalary();
@@ -205,13 +225,17 @@ exports.register = async (req, res) => {
       console.error('Salary calculation error:', salaryError);
     }
 
+    // ── 12. Generate token ──────────────────────────────────────
     const token = generateToken(user._id, user.role, user.employeeId);
 
+    // ── 13. Populate for response ───────────────────────────────
     const populatedUser = await User.findById(user._id)
       .populate('department', 'name')
       .populate('reportingManager', 'firstName lastName employeeId')
+      .populate('shift', 'name code startTime endTime')
       .lean();
 
+    // ── 14. Send response ───────────────────────────────────────
     res.status(201).json({
       success: true,
       message: `${assignedRole} account created successfully`,
@@ -221,9 +245,20 @@ exports.register = async (req, res) => {
         employeeId: user.employeeId,
         fullName: user.fullName,
         email: user.email,
-        role: user.role,                                    // access role
-        department: populatedUser.department?.name,         // department
-        designation: user.designation,                      // designation
+        role: user.role,
+        department: populatedUser.department?.name,
+        designation: user.designation,
+        shift: populatedUser.shift
+          ? {
+              id: populatedUser.shift._id,
+              name: populatedUser.shift.name,
+              code: populatedUser.shift.code,
+              startTime: populatedUser.shift.startTime,
+              endTime: populatedUser.shift.endTime,
+            }
+          : null,
+        shiftAssignedAt: user.shiftAssignedAt,
+        shiftAssignedBy: user.shiftAssignedBy,
         employmentType: user.employmentType,
         reportingManager: populatedUser.reportingManager
           ? `${populatedUser.reportingManager.firstName} ${populatedUser.reportingManager.lastName} (${populatedUser.reportingManager.employeeId})`
@@ -268,9 +303,7 @@ exports.register = async (req, res) => {
 // ────────────────────────────────────────────────────────────────
 exports.login = async (req, res) => {
   try {
-    console.log('🟢 LOGIN HANDLER HIT - file: authController.js');
     const { email, password, deviceId, fcmToken } = req.body;
-    console.log('🟢 deviceId from body:', deviceId);
 
     if (!email || !password) {
       return res.status(400).json({ success: false, message: 'Please provide email and password' });
@@ -279,7 +312,8 @@ exports.login = async (req, res) => {
     const user = await User.findOne({ email })
       .select('+password')
       .populate('department', 'name code')
-      .populate('reportingManager', 'firstName lastName email');
+      .populate('reportingManager', 'firstName lastName email')
+      .populate('shift', 'name code startTime endTime workingDays weekendDays type isNightShift');
 
     if (!user || !(await user.matchPassword(password))) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
@@ -306,15 +340,8 @@ exports.login = async (req, res) => {
         message: 'This account is bound to another device. Please contact HR to reset your device.',
       });
     }
-
-    // ── ROTATE SESSION ─────────────────────────────────────────
-    console.log('🟢 Before session rotation, user.currentSessionId:', user.currentSessionId);
-
     const sessionId = crypto.randomUUID();
-    console.log('🟢 New sessionId generated:', sessionId);
-
     const previousSessionId = user.currentSessionId;
-
     user.currentSessionId = sessionId;
     user.currentSessionDeviceId = deviceId || null;
     user.sessionStartedAt = new Date();
@@ -326,10 +353,7 @@ exports.login = async (req, res) => {
     user.lastLoginUserAgent = req.headers['user-agent'] || null;
 
     await user.save({ validateBeforeSave: false });
-    console.log('🟢 After save, user.currentSessionId:', user.currentSessionId);
-
     const token = generateToken(user._id, user.role, user.employeeId, sessionId);
-    console.log('🟢 Token payload sessionId:', sessionId);
 
     // ── Real-time kick of any previous session (optional) ──────
     if (req.io && previousSessionId && previousSessionId !== sessionId) {
@@ -349,6 +373,7 @@ exports.login = async (req, res) => {
         fullName: user.fullName,
         email: user.email,
         role: user.role,
+        weekendType: user.weekendType,
         department: user.department?.name,
         designation: user.designation,
         phone: user.phone,
@@ -356,6 +381,20 @@ exports.login = async (req, res) => {
         isActive: user.isActive,
         isVerified: user.isVerified,
         deviceId: user.deviceId,
+        shift: user.shift
+          ? {
+            id: user.shift._id,
+            name: user.shift.name,
+            code: user.shift.code,
+            startTime: user.shift.startTime,
+            endTime: user.shift.endTime,
+            timing: `${user.shift.startTime} - ${user.shift.endTime}`,
+            workingDays: user.shift.workingDays,
+            weekendDays: user.shift.weekendDays,
+            type: user.shift.type,
+            isNightShift: user.shift.isNightShift,
+          }
+          : null,
       },
     });
   } catch (error) {
@@ -372,6 +411,7 @@ exports.getMe = async (req, res) => {
   try {
     const user = await User.findById(req.user.id)
       .populate('department', 'name code description')
+      .populate('shift', 'name code startTime endTime workingDays weekendDays type isNightShift breakDuration gracePeriod')
       .populate(
         'reportingManager',
         'employeeId firstName lastName email profilePicture role designation department'
@@ -420,6 +460,9 @@ exports.updateProfile = async (req, res) => {
       'leaveBalance',
       'designation',
       'weekendType',
+      'shift',              // ← ADD
+      'shiftAssignedAt',    // ← ADD
+      'shiftAssignedBy',    // ← ADD
     ];
 
     const updates = { ...req.body };
@@ -854,6 +897,7 @@ exports.checkVerification = async (req, res) => {
 
     const user = await User.findById(userId)
       .select('+isVerified +deviceId +lastLoginDevice +lastLogin +isActive +loginAttempts +accountStatus')
+      .populate('shift', 'name code startTime endTime workingDays weekendDays')
       .lean();
 
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
@@ -944,10 +988,11 @@ exports.checkVerification = async (req, res) => {
         id: user._id,
         fullName: user.fullName,
         email: user.email,
-        role: user.role,               // access role
-        department: user.department,   // department ref
-        designation: user.designation, // designation
+        role: user.role,
+        department: user.department,
+        designation: user.designation,
         profilePicture: user.profilePicture,
+        shift: user.shift,
       },
       deviceMatched: true,
       lastLogin: user.lastLogin,
@@ -959,5 +1004,93 @@ exports.checkVerification = async (req, res) => {
       message: 'Internal server error during verification',
       isVerified: false,
     });
+  }
+};
+
+// ────────────────────────────────────────────────────────────────
+// @desc    Get total users count
+// @route   GET /api/auth/total-users
+// @access  Private (HR Admin / Superadmin)
+// ────────────────────────────────────────────────────────────────
+exports.getUsers = async (req, res, next) => {
+  try {
+    const {
+      isActive,
+      limit = 50,
+      page = 1,
+      search,
+      department,
+      role,
+    } = req.query;
+
+    const filter = {
+      role: {
+        $nin: ['superadmin', 'admin'],
+      },
+    };
+
+    // Active/inactive filter
+    if (isActive !== undefined) {
+      filter.isActive = isActive === 'true';
+    }
+
+    // Department filter
+    if (department) {
+      filter.department = department;
+    }
+
+    // Role filter
+    if (role) {
+      filter.role = role;
+    }
+
+    // Search
+    if (search) {
+      const regex = new RegExp(search.trim(), 'i');
+
+      filter.$or = [
+        { firstName: regex },
+        { lastName: regex },
+        { employeeId: regex },
+        { email: regex },
+        { designation: regex },
+      ];
+    }
+
+    const pageNumber = Math.max(parseInt(page, 10) || 1, 1);
+
+    const limitNumber = Math.min(
+      Math.max(parseInt(limit, 10) || 50, 1),
+      500
+    );
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const [users, total] = await Promise.all([
+      User.find(filter)
+        .select(
+          '_id employeeId firstName lastName email role designation department isActive profilePicture'
+        )
+        .populate('department', 'name')
+        .sort({ firstName: 1, lastName: 1 })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      User.countDocuments(filter),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      count: users.length,
+      total,
+      page: pageNumber,
+      limit: limitNumber,
+      totalPages: Math.ceil(total / limitNumber),
+      data: users,
+    });
+  } catch (error) {
+    console.error('[GET USERS] Error:', error);
+    next(error);
   }
 };

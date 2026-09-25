@@ -22,7 +22,6 @@ const {
   exportHolidays,
   getHolidayStats,
   permanentDeleteHoliday,
-  // ✅ NEW: Image controllers
   uploadHolidayImage,
   deleteHolidayImage,
   updateHolidayImage,
@@ -73,13 +72,12 @@ router.delete(
 // ========== HR & SUPERADMIN ACCESS ==========
 router.post('/', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), validateHolidayInput, addHoliday);
 router.put('/:id', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), validateObjectId, validateHolidayInput, updateHoliday);
-router.delete('/:id', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), validateObjectId, deleteHoliday);
+router.delete('/:id',authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN),validateObjectId,deleteHoliday);
 
 // ========== BULK IMPORT ==========
 router.post('/bulk-import', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), bulkUpload.single('file'), bulkImportHolidays);
 
 // ========== SUPERADMIN ONLY ==========
-router.delete('/:id/permanent', authorize(ACCESS_ROLES.SUPER_ADMIN), validateObjectId, permanentDeleteHoliday);
 router.get('/export', authorize(ACCESS_ROLES.SUPER_ADMIN), exportHolidays);
 router.get('/stats', authorize(ACCESS_ROLES.SUPER_ADMIN), getHolidayStats);
 

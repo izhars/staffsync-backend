@@ -9,12 +9,12 @@ const path = require('path');
 // ───────────────────────────────────────────────
 // Services & Utils
 // ───────────────────────────────────────────────
-const connectDB       = require('./config/db');
-const errorHandler    = require('./middleware/errorHandler');
-const cronJobs        = require('./utils/cronJobs');
-const emailService    = require('./utils/emailService');
+const connectDB = require('./config/db');
+const errorHandler = require('./middleware/errorHandler');
+const cronJobs = require('./utils/cronJobs');
+const emailService = require('./utils/emailService');
 const createSuperAdmin = require('../seedAdmin');
-const { initSocket }  = require('./socket');
+const { initSocket } = require('./socket');
 
 // Firebase Admin
 const admin = require('../src/firebase/firebase');
@@ -22,53 +22,53 @@ const admin = require('../src/firebase/firebase');
 // ───────────────────────────────────────────────
 // Routes
 // ───────────────────────────────────────────────
-const authRoutes             = require('./routes/authRoutes');
-const employeeRoutes         = require('./routes/employeeRoutes');
-const attendanceRoutes       = require('./routes/attendanceRoutes');
-const leaveRoutes            = require('./routes/leaveRoutes');
-const payrollRoutes          = require('./routes/payrollRoutes');
-const departmentRoutes       = require('./routes/departmentRoutes');
-const announcementRoutes     = require('./routes/announcementRoutes');
-const assetRoutes            = require('./routes/assetRoutes');
-const dashboardRoutes        = require('./routes/dashboardRoutes');
-const holidayRoutes          = require('./routes/holidayRoutes');
-const celebrationRoutes      = require('./routes/celebrationRoutes');
-const chatRoutes             = require('./routes/chatRoutes');
-const feedbackRoutes         = require('./routes/feedbackRoutes');
-const pollRoutes             = require('./routes/pollRoutes');
-const awardRoutes            = require('./routes/awardRoutes');
-const badgeRoutes            = require('./routes/badgeRoutes');
-const notificationRoutes     = require('./routes/notificationRoutes');
-const cronTestRoutes         = require('./routes/cronTestRoutes');
-const comboOffRoutes         = require('./routes/comboOffRoutes');
-const faqRoutes              = require('./routes/faqRoutes');
-const helpRoutes             = require('./routes/helpRoutes');
-const ticketRoutes           = require('./routes/ticketRoutes');
-const aboutRoutes            = require('./routes/aboutRoutes');
-const emailRoutes            = require('./routes/emailRoutes');
-const uploadRoutes           = require('./routes/uploadRoutes');
-const taskRoutes             = require('./routes/taskRoutes');
-const systemRoutes           = require('./routes/systemRoutes');
-const expenseRoutes          = require('./routes/expenseRoutes');
-const expenseCategoryRoutes  = require('./routes/expenseCategoryRoutes');
-const projectRoutes          = require('./routes/projectRoutes');
-const roleRoutes             = require('./routes/roleRoutes');
-const tokenRoutes            = require('./routes/tokenRoutes');
-const debugRoutes            = require('./routes/debugRoutes');
-const dailyTaskRoutes        = require('./routes/dailyTaskRoutes');
-const callRoutes             = require('./routes/callRoutes');
+const authRoutes = require('./routes/authRoutes');
+const employeeRoutes = require('./routes/employeeRoutes');
+const attendanceRoutes = require('./routes/attendanceRoutes');
+const leaveRoutes = require('./routes/leaveRoutes');
+const payrollRoutes = require('./routes/payrollRoutes');
+const departmentRoutes = require('./routes/departmentRoutes');
+const announcementRoutes = require('./routes/announcementRoutes');
+const assetRoutes = require('./routes/assetRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
+const holidayRoutes = require('./routes/holidayRoutes');
+const celebrationRoutes = require('./routes/celebrationRoutes');
+const chatRoutes = require('./routes/chatRoutes');
+const feedbackRoutes = require('./routes/feedbackRoutes');
+const pollRoutes = require('./routes/pollRoutes');
+const awardRoutes = require('./routes/awardRoutes');
+const badgeRoutes = require('./routes/badgeRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
+const cronTestRoutes = require('./routes/cronTestRoutes');
+const comboOffRoutes = require('./routes/comboOffRoutes');
+const faqRoutes = require('./routes/faqRoutes');
+const helpRoutes = require('./routes/helpRoutes');
+const ticketRoutes = require('./routes/ticketRoutes');
+const aboutRoutes = require('./routes/aboutRoutes');
+const emailRoutes = require('./routes/emailRoutes');
+const uploadRoutes = require('./routes/uploadRoutes');
+const taskRoutes = require('./routes/taskRoutes');
+const systemRoutes = require('./routes/systemRoutes');
+const expenseRoutes = require('./routes/expenseRoutes');
+const expenseCategoryRoutes = require('./routes/expenseCategoryRoutes');
+const projectRoutes = require('./routes/projectRoutes');
+const roleRoutes = require('./routes/roleRoutes');
+const tokenRoutes = require('./routes/tokenRoutes');
+const debugRoutes = require('./routes/debugRoutes');
+const dailyTaskRoutes = require('./routes/dailyTaskRoutes');
+const callRoutes = require('./routes/callRoutes');
 const employeeInteractionRoutes = require('./routes/employeeInteractionRoutes');
-const rfidRoutes             = require('./routes/rfidRoutes');
-const numberPlateRoutes      = require('./routes/numberPlateRoutes');
-const geoFenceRoutes         = require('./routes/geoFence');
-const geocodeRoutes          = require('./routes/geocode');
-const faceRoutes             = require('./routes/faceRoutes');
-const githubRoutes           = require('./routes/githubRoutes');
-
+const rfidRoutes = require('./routes/rfidRoutes');
+const numberPlateRoutes = require('./routes/numberPlateRoutes');
+const geoFenceRoutes = require('./routes/geoFence');
+const geocodeRoutes = require('./routes/geocode');
+const faceRoutes = require('./routes/faceRoutes');
+const githubRoutes = require('./routes/githubRoutes');
+const shiftRoutes = require('./routes/shifts');
 // ───────────────────────────────────────────────
 // App / Server
 // ───────────────────────────────────────────────
-const app    = express();
+const app = express();
 const server = http.createServer(app);
 
 // ───────────────────────────────────────────────
@@ -80,7 +80,7 @@ app.use(
       directives: {
         ...helmet.contentSecurityPolicy.getDefaultDirectives(),
         'form-action': ["'self'"],
-        'script-src':  ["'self'", "'unsafe-inline'"],
+        'script-src': ["'self'", "'unsafe-inline'"],
       },
     },
   })
@@ -131,48 +131,49 @@ app.get('/reset-password/:token', (req, res) => {
 // ───────────────────────────────────────────────
 // API Routes
 // ───────────────────────────────────────────────
-app.use('/api/auth',                  authRoutes);
-app.use('/api/employees',             employeeRoutes);
-app.use('/api/attendance',            attendanceRoutes);
-app.use('/api/leaves',                leaveRoutes);
-app.use('/api/payroll',               payrollRoutes);
-app.use('/api/departments',           departmentRoutes);
-app.use('/api/announcements',         announcementRoutes);
-app.use('/api/assets',                assetRoutes);
-app.use('/api/dashboard',             dashboardRoutes);
-app.use('/api/holidays',              holidayRoutes);
-app.use('/api/celebrations',          celebrationRoutes);
-app.use('/api/chat',                  chatRoutes);
-app.use('/api/feedbacks',             feedbackRoutes);
-app.use('/api/polls',                 pollRoutes);
-app.use('/api/awards',                awardRoutes);
-app.use('/api/badges',                badgeRoutes);
-app.use('/api/notifications',         notificationRoutes);
-app.use('/api/cron',                  cronTestRoutes);
-app.use('/api/combooff',              comboOffRoutes);
-app.use('/api/faqs',                  faqRoutes);
-app.use('/api/help-topics',           helpRoutes);
-app.use('/api/tickets',               ticketRoutes);
-app.use('/api/about',                 aboutRoutes);
-app.use('/api/email',                 emailRoutes);
-app.use('/api/upload',                uploadRoutes);
-app.use('/api/tasks',                 taskRoutes);
-app.use('/api/system',                systemRoutes);
-app.use('/api/expenses',              expenseRoutes);
-app.use('/api/expense-categories',    expenseCategoryRoutes);
-app.use('/api/projects',              projectRoutes);
-app.use('/api/project-roles',         roleRoutes);
-app.use('/api/tokens',                tokenRoutes);
-app.use('/api/debug',                 debugRoutes);
-app.use('/api/daily-tasks',           dailyTaskRoutes);
-app.use('/api/calls',                 callRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/employees', employeeRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use('/api/leaves', leaveRoutes);
+app.use('/api/payroll', payrollRoutes);
+app.use('/api/departments', departmentRoutes);
+app.use('/api/announcements', announcementRoutes);
+app.use('/api/assets', assetRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/holidays', holidayRoutes);
+app.use('/api/celebrations', celebrationRoutes);
+app.use('/api/chat', chatRoutes);
+app.use('/api/feedbacks', feedbackRoutes);
+app.use('/api/polls', pollRoutes);
+app.use('/api/awards', awardRoutes);
+app.use('/api/badges', badgeRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/cron', cronTestRoutes);
+app.use('/api/combooff', comboOffRoutes);
+app.use('/api/faqs', faqRoutes);
+app.use('/api/help-topics', helpRoutes);
+app.use('/api/tickets', ticketRoutes);
+app.use('/api/about', aboutRoutes);
+app.use('/api/email', emailRoutes);
+app.use('/api/upload', uploadRoutes);
+app.use('/api/tasks', taskRoutes);
+app.use('/api/system', systemRoutes);
+app.use('/api/expenses', expenseRoutes);
+app.use('/api/expense-categories', expenseCategoryRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/project-roles', roleRoutes);
+app.use('/api/tokens', tokenRoutes);
+app.use('/api/debug', debugRoutes);
+app.use('/api/daily-tasks', dailyTaskRoutes);
+app.use('/api/calls', callRoutes);
 app.use('/api/employee-interactions', employeeInteractionRoutes);
-app.use('/api/rfid-scans',            rfidRoutes);
-app.use('/api/plate',                 numberPlateRoutes);
-app.use('/api/geo-fence',             geoFenceRoutes);
-app.use('/api/geocode',               geocodeRoutes);
-app.use('/api/face',                  faceRoutes);
-app.use('/api/github',                githubRoutes);
+app.use('/api/rfid-scans', rfidRoutes);
+app.use('/api/plate', numberPlateRoutes);
+app.use('/api/geo-fence', geoFenceRoutes);
+app.use('/api/geocode', geocodeRoutes);
+app.use('/api/face', faceRoutes);
+app.use('/api/github', githubRoutes);
+app.use('/api/shifts', shiftRoutes);
 
 // ───────────────────────────────────────────────
 // Debug Endpoints
@@ -191,7 +192,7 @@ app.get('/api/debug/socket-status', (req, res) => {
     }
 
     const onlineUsers = getOnlineUsers ? getOnlineUsers() : [];
-    const sockets     = io.sockets ? Array.from(io.sockets.sockets.keys()) : [];
+    const sockets = io.sockets ? Array.from(io.sockets.sockets.keys()) : [];
 
     res.json({
       success: true,

@@ -18,6 +18,7 @@ const {
   setVerification,
   checkVerification,
   updateProfilePicture,
+  getUsers,
 } = require('../controllers/authController');
 
 const { protect, hrAndAbove } = require('../middleware/auth');
@@ -32,9 +33,10 @@ router.put('/reset-password/:token', resetPassword);
 // ── Protected (HR Admin / Superadmin) ───────────────────────────
 router.post('/register', protect, hrAndAbove, registerValidator, registerLimiter, register);
 router.put('/reset-device/:userId', protect, hrAndAbove, resetDevice);
-router.put('/verify/:userId',       protect, hrAndAbove, setVerification);
-router.get('/managers',             protect, hrAndAbove, getManagers);
+router.put('/verify/:userId', protect, hrAndAbove, setVerification);
+router.get('/managers', protect, hrAndAbove, getManagers);
 router.patch('/assign-manager/:userId', protect, hrAndAbove, assignManager);
+router.get('/users', protect, hrAndAbove, getUsers);
 
 // ── Authenticated user routes ───────────────────────────────────
 router.use(protect);

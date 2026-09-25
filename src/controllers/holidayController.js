@@ -28,7 +28,7 @@ exports.addHoliday = async (req, res) => {
           category = 'Mandatory',
           maxAllowed = null,
           applicableTo = ['all'],
-          image = null // ✅ NEW: Accept image data
+          image = null
         } = h;
 
         // Validate required fields
@@ -522,68 +522,46 @@ exports.getHolidayById = async (req, res) => {
   }
 };
 
-// Update holiday
+// ✅ Single delete: permanently removes holiday + image
 exports.deleteHoliday = async (req, res) => {
   try {
     const { id } = req.params;
 
     const holiday = await Holiday.findById(id);
     if (!holiday) {
-      return res.status(404).json({ message: 'Holiday not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Holiday not found'
+      });
     }
 
     // Delete image from Cloudinary if exists
     if (holiday.image && holiday.image.publicId) {
       try {
         await deleteFromCloudinary(holiday.image.publicId);
-        console.log('🗑️ Holiday image deleted:', holiday.image.publicId);
+        console.log('🗑️ Holiday image deleted from Cloudinary:', holiday.image.publicId);
       } catch (err) {
-        console.error('Failed to delete holiday image:', err.message);
-        // Continue with soft delete even if image deletion fails
+        console.error('⚠️ Failed to delete Cloudinary image:', err.message);
+        // Continue — don't block holiday deletion if image cleanup fails
       }
     }
 
-    // Soft delete
-    holiday.isActive = false;
-    holiday.deletedAt = new Date();
-    await holiday.save();
+    // Permanent delete from DB
+    await Holiday.findByIdAndDelete(id);
 
     res.json({
-      message: 'Holiday soft-deleted successfully',
-      data: holiday
+      success: true,
+      message: 'Holiday deleted successfully',
+      data: { id: holiday._id, name: holiday.name }
     });
+
   } catch (error) {
     console.error('Delete holiday error:', error);
-    res.status(500).json({ message: 'Failed to delete holiday', error: error.message });
-  }
-};
-
-
-// Delete holiday (soft delete)
-exports.deleteHoliday = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const holiday = await Holiday.findByIdAndUpdate(
-      id,
-      {
-        isActive: false,
-        deletedAt: new Date()
-      },
-      { new: true }
-    );
-
-    if (!holiday) {
-      return res.status(404).json({ message: 'Holiday not found' });
-    }
-
-    res.json({
-      message: 'Holiday soft-deleted successfully',
-      data: holiday
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete holiday',
+      error: error.message
     });
-  } catch (error) {
-    console.error('Delete holiday error:', error);
-    res.status(500).json({ message: 'Failed to delete holiday', error: error.message });
   }
 };
 

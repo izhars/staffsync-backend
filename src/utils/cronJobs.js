@@ -21,8 +21,8 @@ async function isEmployeeOnLeave(employeeId) {
   const leave = await Leave.findOne({
     employee: employeeId,
     startDate: { $lte: today },
-    endDate:   { $gte: today },
-    status:    'approved',
+    endDate: { $gte: today },
+    status: 'approved',
   });
 
   return !!leave;
@@ -108,9 +108,9 @@ const cronTasks = {
         {
           $set: {
             'leaveBalance.casual': 12,
-            'leaveBalance.sick':   10,
+            'leaveBalance.sick': 10,
             'leaveBalance.earned': 15,
-            'leaveBalance.combo':  0,
+            'leaveBalance.combo': 0,
             'leaveBalance.unpaid': 0,
             leaveCreditedAt: new Date(),
             leaveCreditType: 'annual-reset',
@@ -128,9 +128,9 @@ const cronTasks = {
         {
           $set: {
             'leaveBalance.casual': 0,
-            'leaveBalance.sick':   0,
+            'leaveBalance.sick': 0,
             'leaveBalance.earned': 0,
-            'leaveBalance.combo':  0,
+            'leaveBalance.combo': 0,
             'leaveBalance.unpaid': 0,
             leaveCreditType: 'none',
             leaveCreditedAt: null,
@@ -158,7 +158,7 @@ const cronTasks = {
 
       const today = moment().tz('Asia/Kolkata');
       const month = today.month() + 1;
-      const day   = today.date();
+      const day = today.date();
 
       const employees = await User.find({
         isActive: true,
@@ -217,7 +217,7 @@ const cronTasks = {
       );
 
       const successful = results.filter(r => r.status === 'fulfilled').length;
-      const failed     = results.filter(r => r.status === 'rejected').length;
+      const failed = results.filter(r => r.status === 'rejected').length;
 
       return {
         success: true,
@@ -249,7 +249,7 @@ const cronTasks = {
       );
 
       const successful = results.filter(r => r.status === 'fulfilled').length;
-      const failed     = results.filter(r => r.status === 'rejected').length;
+      const failed = results.filter(r => r.status === 'rejected').length;
 
       return {
         success: true,
@@ -276,6 +276,44 @@ const cronTasks = {
       return { success: false, error: error.message };
     }
   },
+
+  /**
+ * Credit MONTHLY_CASUAL_CREDIT (2) casual leaves to every
+ * post-probation employee. Runs on the 1st of every month.
+ * Probation employees stay at zero.
+ */
+  creditMonthlyLeave: async () => {
+    try {
+      await updateCronRun('creditMonthlyLeave');
+
+      // 1. Post-probation employees → +2 casual
+      const result = await User.creditMonthlyLeaves();
+
+      // 2. Probation employees → keep at zero (idempotent safety)
+      await User.updateMany(
+        {
+          isActive: true,
+          role: { $nin: ADMIN_ROLES },
+          isProbationCompleted: false,
+        },
+        {
+          $set: {
+            'leaveBalance.casual': 0,
+            'leaveBalance.combo': 0,
+          },
+        }
+      );
+
+      return {
+        success: true,
+        credited: result.credited,
+        amount: result.amount,
+      };
+    } catch (error) {
+      console.error('❌ Error crediting monthly leave:', error);
+      return { success: false, error: error.message };
+    }
+  },
 };
 
 // ───────────────────────────────────────────────
@@ -293,6 +331,13 @@ exports.resetLeaveBalance = cron.schedule(
 exports.sendBirthdayWishes = cron.schedule(
   '0 9 * * *',
   cronTasks.sendBirthdayWishes,
+  { scheduled: true, timezone: 'Asia/Kolkata' }
+);
+
+/* 📅 MONTHLY CASUAL LEAVE ACCRUAL — 1st of every month, 12:05 AM IST */
+exports.creditMonthlyLeave = cron.schedule(
+  '5 0 1 * *',
+  cronTasks.creditMonthlyLeave,
   { scheduled: true, timezone: 'Asia/Kolkata' }
 );
 
@@ -336,7 +381,7 @@ exports.startCronJobs = async () => {
     }
 
     const jobs = [
-      exports.resetLeaveBalance,
+      exports.creditMonthlyLeave,          // ← renamed
       exports.sendBirthdayWishes,
       exports.generateMonthlyReport,
       exports.notifyMorningPunchIn,
@@ -351,29 +396,26 @@ exports.startCronJobs = async () => {
   }
 };
 
-/* ⏸️ STOP ALL CRON JOBS */
 exports.stopCronJobs = () => {
   const jobs = [
-    exports.resetLeaveBalance,
+    exports.creditMonthlyLeave,            // ← renamed
     exports.sendBirthdayWishes,
     exports.generateMonthlyReport,
     exports.notifyMorningPunchIn,
     exports.notifyEveningPunchOut,
     exports.sendCelebrationNotifications,
   ];
-
   jobs.forEach(job => job.stop());
   console.log('🛑 Cron jobs stopped');
 };
 
-/* 🔍 GET CRON JOB STATUS */
 exports.getCronStatus = () => {
   const jobs = [
-    { name: 'resetLeaveBalance',            task: exports.resetLeaveBalance },
-    { name: 'sendBirthdayWishes',           task: exports.sendBirthdayWishes },
-    { name: 'generateMonthlyReport',        task: exports.generateMonthlyReport },
-    { name: 'notifyMorningPunchIn',         task: exports.notifyMorningPunchIn },
-    { name: 'notifyEveningPunchOut',        task: exports.notifyEveningPunchOut },
+    { name: 'creditMonthlyLeave', task: exports.creditMonthlyLeave }, // ← renamed
+    { name: 'sendBirthdayWishes', task: exports.sendBirthdayWishes },
+    { name: 'generateMonthlyReport', task: exports.generateMonthlyReport },
+    { name: 'notifyMorningPunchIn', task: exports.notifyMorningPunchIn },
+    { name: 'notifyEveningPunchOut', task: exports.notifyEveningPunchOut },
     { name: 'sendCelebrationNotifications', task: exports.sendCelebrationNotifications },
   ];
 

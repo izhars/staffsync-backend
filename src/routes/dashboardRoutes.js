@@ -1,3 +1,5 @@
+// routes/dashboardRoutes.js
+
 const express = require('express');
 const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
@@ -8,21 +10,30 @@ const {
   getLeaveOverview,
   getEmployeeGrowth,
   getAllEmployees,
-  getEmployeeById
+  getEmployeeById,
 } = require('../controllers/dashboardController');
 
+// All routes require authentication
 router.use(protect);
 
-// Public to logged-in users
+// Dashboard stats (all authenticated users)
 router.get('/stats', getDashboardStats);
 
-// Restricted routes
-router.get('/attendance-overview', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.MANAGER, ACCESS_ROLES.SUPER_ADMIN), getAttendanceOverview);
-router.get('/leave-overview', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.MANAGER, ACCESS_ROLES.SUPER_ADMIN), getLeaveOverview);
-router.get('/employee-growth', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), getEmployeeGrowth);
+// Analytics (HR, Manager, Admin)
+const analyticsRoles = authorize(
+  ACCESS_ROLES.HR_ADMIN,
+  ACCESS_ROLES.MANAGER,
+  ACCESS_ROLES.SUPER_ADMIN
+);
 
-// Employee CRUD
-router.get('/employees', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), getAllEmployees);
-router.get('/employees/:id', authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN), getEmployeeById);
+router.get('/attendance-overview', analyticsRoles, getAttendanceOverview);
+router.get('/leave-overview', analyticsRoles, getLeaveOverview);
+
+// Growth & employee management (HR, Admin only)
+const adminRoles = authorize(ACCESS_ROLES.HR_ADMIN, ACCESS_ROLES.SUPER_ADMIN);
+
+router.get('/employee-growth', adminRoles, getEmployeeGrowth);
+router.get('/employees', adminRoles, getAllEmployees);
+router.get('/employees/:id', adminRoles, getEmployeeById);
 
 module.exports = router;

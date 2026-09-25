@@ -8,8 +8,8 @@ const leaveSchema = new mongoose.Schema({
   },
   leaveType: {
     type: String,
-    enum: ['casual', 'sick', 'earned', 'combo', 'unpaid', 'maternity', 'paternity'], // ← ADD 'combo'
-    required: true
+    enum: ['casual', 'combo'],   // ← trimmed
+    required: true,
   },
 
   // 👇 Added for full-day or half-day selection

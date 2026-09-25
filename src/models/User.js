@@ -8,21 +8,16 @@ const { ACCESS_ROLES, ADMIN_ROLES } = require('../constants/roles');
 // Constants
 // ────────────────────────────────────────────────────────────────
 const PROBATION_MONTHS = 6;
+const MONTHLY_CASUAL_CREDIT = 2;   // 2 casual leaves per month after probation
 
 const FULL_LEAVE_QUOTA = {
-  casual: 12,
-  sick: 10,
-  earned: 15,
+  casual: MONTHLY_CASUAL_CREDIT,   // credit 2 on probation completion
   combo: 0,
-  unpaid: 0,
 };
 
 const ZERO_LEAVE_QUOTA = {
   casual: 0,
-  sick: 0,
-  earned: 0,
   combo: 0,
-  unpaid: 0,
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -80,6 +75,21 @@ const userSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Department',
       required: true,
+    },
+    shift: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Shift',
+      default: null,
+      index: true,
+    },
+    shiftAssignedAt: {
+      type: Date,
+      default: null,
+    },
+    shiftAssignedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
     },
     designation: {
       type: String,
@@ -214,21 +224,17 @@ const userSchema = new mongoose.Schema(
     // when probation completes (see hooks below).
     leaveBalance: {
       casual: { type: Number, default: 0, min: 0 },
-      sick: { type: Number, default: 0, min: 0 },
-      earned: { type: Number, default: 0, min: 0 },
       combo: { type: Number, default: 0, min: 0 },
-      unpaid: { type: Number, default: 0, min: 0 },
     },
-    // Audit trail of when leave was credited
     leaveCreditedAt: { type: Date, default: null },
     leaveCreditType: {
       type: String,
-      enum: ['none', 'probation-completion', 'annual-reset', 'manual-adjustment'],
+      enum: ['none', 'probation-completion', 'monthly-accrual', 'manual-adjustment'],
       default: 'none',
     },
     leaveHistory: [{
       action: { type: String, enum: ['credit', 'debit', 'adjustment', 'reset'] },
-      leaveType: { type: String, enum: ['casual', 'sick', 'earned', 'combo', 'unpaid', 'all'] },
+      leaveType: { type: String, enum: ['casual', 'combo', 'all'] },
       amount: Number,
       balanceAfter: mongoose.Schema.Types.Mixed,
       reason: String,
@@ -402,7 +408,14 @@ userSchema.virtual('probationDaysRemaining').get(function () {
 // Total leave balance (excluding unpaid)
 userSchema.virtual('totalPaidLeave').get(function () {
   const lb = this.leaveBalance || {};
-  return (lb.casual || 0) + (lb.sick || 0) + (lb.earned || 0) + (lb.combo || 0);
+  return (lb.casual || 0) + (lb.combo || 0);
+});
+
+userSchema.virtual('currentShiftTiming').get(function () {
+  if (this.shift && this.shift.startTime) {
+    return `${this.shift.startTime} - ${this.shift.endTime}`;
+  }
+  return null;
 });
 
 // ────────────────────────────────────────────────────────────────
@@ -492,9 +505,8 @@ userSchema.pre('save', function (next) {
 
 // 5. Probation-aware leave balance enforcement
 //    - During probation  → leave balance must stay ZERO
-//    - On probation end  → credit FULL_LEAVE_QUOTA exactly once
+//    - On probation end  → credit MONTHLY_CASUAL_CREDIT once
 userSchema.pre('save', function (next) {
-  // Skip for admin roles — they don't accrue leave
   if (ADMIN_ROLES.includes(this.role)) return next();
 
   // Still in probation → force zero
@@ -505,31 +517,26 @@ userSchema.pre('save', function (next) {
     return next();
   }
 
-  // Just completed probation (transition false → true)
   const justCompleted =
     this.isModified('isProbationCompleted') && this.isProbationCompleted === true;
 
-  // Credit only if never credited before (idempotent)
   const neverCredited = !this.leaveCreditedAt;
 
-  // Also handle: existing doc where all balances are zero (first post-probation save)
   const lb = this.leaveBalance || {};
-  const allZero =
-    !lb.casual && !lb.sick && !lb.earned && !lb.combo && !lb.unpaid;
+  const allZero = !lb.casual && !lb.combo;
 
   if ((justCompleted && neverCredited) || (neverCredited && allZero)) {
     this.leaveBalance = { ...FULL_LEAVE_QUOTA };
     this.leaveCreditedAt = new Date();
     this.leaveCreditType = 'probation-completion';
 
-    // Push to history
     if (!Array.isArray(this.leaveHistory)) this.leaveHistory = [];
     this.leaveHistory.push({
       action: 'credit',
-      leaveType: 'all',
-      amount: FULL_LEAVE_QUOTA.casual + FULL_LEAVE_QUOTA.sick + FULL_LEAVE_QUOTA.earned,
+      leaveType: 'casual',
+      amount: MONTHLY_CASUAL_CREDIT,
       balanceAfter: { ...FULL_LEAVE_QUOTA },
-      reason: `Probation completed after ${PROBATION_MONTHS} months — full annual leave quota credited`,
+      reason: `Probation completed after ${PROBATION_MONTHS} months — ${MONTHLY_CASUAL_CREDIT} casual leaves credited`,
       performedAt: new Date(),
     });
   }
@@ -583,7 +590,6 @@ userSchema.methods.completeProbation = async function (performedBy = null) {
   this.isProbationCompleted = true;
   if (!this.probationEndDate) this.probationEndDate = new Date();
 
-  // Credit full quota now
   this.leaveBalance = { ...FULL_LEAVE_QUOTA };
   this.leaveCreditedAt = new Date();
   this.leaveCreditType = 'probation-completion';
@@ -591,10 +597,10 @@ userSchema.methods.completeProbation = async function (performedBy = null) {
   if (!Array.isArray(this.leaveHistory)) this.leaveHistory = [];
   this.leaveHistory.push({
     action: 'credit',
-    leaveType: 'all',
-    amount: FULL_LEAVE_QUOTA.casual + FULL_LEAVE_QUOTA.sick + FULL_LEAVE_QUOTA.earned,
+    leaveType: 'casual',
+    amount: MONTHLY_CASUAL_CREDIT,
     balanceAfter: { ...FULL_LEAVE_QUOTA },
-    reason: 'Probation completed (manual) — full annual leave quota credited',
+    reason: 'Probation completed (manual) — casual leaves credited',
     performedBy: performedBy,
     performedAt: new Date(),
   });
@@ -612,7 +618,8 @@ userSchema.methods.adjustLeave = async function ({
   reason = '',
   performedBy = null,
 }) {
-  if (!this.leaveBalance[leaveType] === undefined) {
+  // Fixed: correct undefined check
+  if (this.leaveBalance[leaveType] === undefined) {
     throw new Error(`Invalid leave type: ${leaveType}`);
   }
 
@@ -645,6 +652,7 @@ userSchema.methods.adjustLeave = async function ({
   return this.save();
 };
 
+
 // ────────────────────────────────────────────────────────────────
 // Static Methods
 // ────────────────────────────────────────────────────────────────
@@ -664,13 +672,12 @@ userSchema.statics.completeExpiredProbations = async function () {
     probationEndDate: { $lte: now },
     role: { $nin: ADMIN_ROLES },
     isActive: true,
-  }).select('+password'); // keep password for save() to work
+  }).select('+password');
 
   let completed = 0;
   for (const user of users) {
     try {
       user.isProbationCompleted = true;
-      // Only credit if not already credited
       if (!user.leaveCreditedAt) {
         user.leaveBalance = { ...FULL_LEAVE_QUOTA };
         user.leaveCreditedAt = new Date();
@@ -679,10 +686,10 @@ userSchema.statics.completeExpiredProbations = async function () {
         if (!Array.isArray(user.leaveHistory)) user.leaveHistory = [];
         user.leaveHistory.push({
           action: 'credit',
-          leaveType: 'all',
-          amount: FULL_LEAVE_QUOTA.casual + FULL_LEAVE_QUOTA.sick + FULL_LEAVE_QUOTA.earned,
+          leaveType: 'casual',
+          amount: MONTHLY_CASUAL_CREDIT,
           balanceAfter: { ...FULL_LEAVE_QUOTA },
-          reason: `Auto-completed probation after ${PROBATION_MONTHS} months — full annual leave credited`,
+          reason: `Auto-completed probation after ${PROBATION_MONTHS} months — casual leaves credited`,
           performedAt: new Date(),
         });
       }
@@ -694,6 +701,39 @@ userSchema.statics.completeExpiredProbations = async function () {
   }
 
   return completed;
+};
+
+/**
+ * Monthly accrual — credits MONTHLY_CASUAL_CREDIT to every
+ * post-probation employee. Called by cron on the 1st of every month.
+ */
+userSchema.statics.creditMonthlyLeaves = async function () {
+  const result = await this.updateMany(
+    {
+      isActive: true,
+      status: 'active',
+      role: { $nin: ADMIN_ROLES },
+      isProbationCompleted: true,
+    },
+    {
+      $inc: { 'leaveBalance.casual': MONTHLY_CASUAL_CREDIT },
+      $set: {
+        leaveCreditedAt: new Date(),
+        leaveCreditType: 'monthly-accrual',
+      },
+      $push: {
+        leaveHistory: {
+          action: 'credit',
+          leaveType: 'casual',
+          amount: MONTHLY_CASUAL_CREDIT,
+          reason: `Monthly accrual — ${MONTHLY_CASUAL_CREDIT} casual leaves credited`,
+          performedAt: new Date(),
+        },
+      },
+    }
+  );
+
+  return { credited: result.modifiedCount, amount: MONTHLY_CASUAL_CREDIT };
 };
 
 /**

@@ -2,11 +2,12 @@ const Attendance = require('../models/Attendance');
 const User = require('../models/User');
 const Holiday = require('../models/Holiday');
 const Leave = require('../models/Leave');
+const ExcelJS = require('exceljs');
 const ComboOff = require('../models/ComboOff');
 const moment = require('moment-timezone');
 const RestrictedHolidayUsage = require('../models/RestrictedHolidayUsage');
 const { isWithinAnyGeoFence } = require('../utils/geoFence');
-const { ACCESS_ROLES, NON_ADMIN_ROLES, } = require('../constants/roles');
+const { ACCESS_ROLES, NON_ADMIN_ROLES } = require('../constants/roles');
 const {
   evaluatePunchVerification,
   PRIVILEGED_ROLES,
@@ -16,27 +17,58 @@ const { verifyEmployeeFace } = require('../utils/faceMatch');
 const FACE_MATCH_THRESHOLD = 0.75;
 
 const {
+  TIMEZONE,
+  getMonthStart,
+  getMonthEnd,
+  getISTDateString,
   getISTDate,
+  nowIST,
   getISTMidnight,
-  getISTStandardTime,
+  getISTStandardTime, // still used by updateAttendance until you migrate it
   getISTStandardCheckoutTime,
   formatISTTime,
   getCurrentWorkHours,
   getISTDay,
 } = require('../utils/dateUtils');
 
+const {
+  TZ,
+  resolveUserShift,
+  snapshotShift,
+  snapFromAttendance,
+  resolveShiftDate,
+  evaluateCheckIn,
+  evaluateCheckOut,
+} = require('../utils/shiftUtils');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK-IN
+// ─────────────────────────────────────────────────────────────────────────────
 exports.checkIn = async (req, res) => {
   try {
     const { latitude, longitude, address, deviceInfo, faceEmbedding } = req.body;
-    const today = getISTMidnight();
 
-    // ── 0. Fetch user with role + weekend + department ────────────────
+    // ── 0. Fetch user ─────────────────────────────────────────────────
     const user = await User.findById(req.user.id).select(
       'weekendType department role'
     );
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
+
+    // ── 0b. Resolve shift + shift date (overnight-aware) ──────────────
+    const shiftDoc = await resolveUserShift(req.user.id);
+    const snap = snapshotShift(shiftDoc);
+    const checkInTime = getISTDate();
+    const nowIST = moment(checkInTime).tz(TZ);
+    const shiftDate = resolveShiftDate(snap, nowIST);
+
+    // Normalize to IST midnight for date-based queries
+    const todayStart = moment(shiftDate).tz(TZ).startOf('day').toDate();
+    const tomorrowStart = moment(todayStart).tz(TZ).add(1, 'day').toDate();
+
+    // Keep `today` as shiftDate for storage (so attendance.date aligns with shift)
+    const today = shiftDate.toDate();
 
     const hasCoords =
       latitude !== undefined &&
@@ -117,16 +149,15 @@ exports.checkIn = async (req, res) => {
       }
     }
 
-    // ── 3. Weekend / Holiday check ────────────────────────────────────
+    // ── 3. Weekend / Holiday check (against the shift date) ───────────
     const weekendType = user.weekendType || 'sunday';
     const day = getISTDay(today);
     const isWeekend =
       (weekendType === 'sunday' && day === 0) ||
       (weekendType === 'saturday_sunday' && (day === 0 || day === 6));
 
-    const startOfDay = getISTMidnight();
-    const endOfDay = new Date(startOfDay);
-    endOfDay.setDate(startOfDay.getDate() + 1);
+    const startOfDay = todayStart;
+    const endOfDay = tomorrowStart;
 
     const holiday = await Holiday.findOne({
       date: { $gte: startOfDay, $lt: endOfDay },
@@ -141,7 +172,7 @@ exports.checkIn = async (req, res) => {
       // ── Plain weekend (no holiday) ──
       comboOff = await ComboOff.findOne({
         employee: req.user.id,
-        date: today,
+        date: { $gte: startOfDay, $lt: endOfDay },
         status: 'approved',
       });
 
@@ -152,12 +183,10 @@ exports.checkIn = async (req, res) => {
         });
       }
     } else if (holiday) {
-      // ── Holiday present ──
       if (holiday.category === 'Mandatory') {
-        // Mandatory holiday → block unless Combo Off approved
         comboOff = await ComboOff.findOne({
           employee: req.user.id,
-          date: today,
+          date: { $gte: startOfDay, $lt: endOfDay },
           status: 'approved',
         });
 
@@ -170,16 +199,14 @@ exports.checkIn = async (req, res) => {
       } else if (holiday.category === 'Restricted') {
         isRestrictedHoliday = true;
 
-        const currentYear = new Date(today).getFullYear();
+        const currentYear = moment(today).tz(TZ).year();
 
-        // Quota: use maxAllowed from holiday if set, else default 2
         const quota =
           holiday.maxAllowed && holiday.maxAllowed > 0
             ? holiday.maxAllowed
             : 2;
         restrictedHolidayQuota = quota;
 
-        // Check if user already availed THIS holiday
         const existingUsageForThisHoliday =
           await RestrictedHolidayUsage.findOne({
             employee: req.user.id,
@@ -193,7 +220,6 @@ exports.checkIn = async (req, res) => {
           });
         }
 
-        // Count how many restricted holidays availed this year
         const usedCount = await RestrictedHolidayUsage.countDocuments({
           employee: req.user.id,
           year: currentYear,
@@ -206,7 +232,6 @@ exports.checkIn = async (req, res) => {
           });
         }
 
-        // Check applicability
         if (
           holiday.applicableTo &&
           !holiday.applicableTo.includes('all') &&
@@ -217,39 +242,67 @@ exports.checkIn = async (req, res) => {
             message: `You are not eligible for this restricted holiday`,
           });
         }
-
-        // ✅ No Combo Off required for restricted holidays
       }
     }
 
-    // ── 4. Leave check ────────────────────────────────────────────────
+    // ── 4. Leave check (FIXED) ────────────────────────────────────────
+    // Matches a leave if TODAY (in IST) falls within [startDate, endDate] inclusive,
+    // regardless of whether endDate is stored as midnight, end-of-day, or next-day-start.
     const leave = await Leave.findOne({
       employee: req.user.id,
-      fromDate: { $lte: today },
-      toDate: { $gte: today },
       status: 'approved',
+      startDate: { $lt: tomorrowStart },     // leave starts before tomorrow
+      endDate: { $gte: todayStart },         // leave ends on/after today start
     });
 
     if (leave) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot check in, you are on approved leave',
-      });
+      if (leave.leaveDuration === 'full') {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot check in, you are on approved ${leave.leaveType} leave`,
+          leave: {
+            _id: leave._id,
+            leaveType: leave.leaveType,
+            startDate: leave.startDate,
+            endDate: leave.endDate,
+            leaveDuration: leave.leaveDuration,
+          },
+        });
+      }
+
+      // Half-day leave: only block the relevant half (boundary at 14:00 IST)
+      const hourIST = nowIST.hour();
+      const isFirstHalf = leave.halfDayType === 'first_half';
+      const isSecondHalf = leave.halfDayType === 'second_half';
+
+      if ((isFirstHalf && hourIST < 14) || (isSecondHalf && hourIST >= 14)) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot check in during your ${isFirstHalf ? 'first' : 'second'} half-day leave`,
+          leave: {
+            _id: leave._id,
+            leaveType: leave.leaveType,
+            halfDayType: leave.halfDayType,
+          },
+        });
+      }
     }
 
-    // ── 5. Time restriction ───────────────────────────────────────────
-    const currentIST = moment().tz('Asia/Kolkata');
-    if (currentIST.hour() >= 18) {
+    // ── 5. Shift window (replaces hard-coded 6 PM cutoff) ─────────────
+    const shiftEval = evaluateCheckIn(snap, shiftDate, nowIST);
+    if (!shiftEval.allowed) {
       return res.status(400).json({
         success: false,
-        message: 'Check-in not allowed after 6 PM. Office closed bro 🛑',
+        reason: shiftEval.reason,
+        message: `Check-in not allowed after shift end (${snap.endTime}) for ${snap.name}`,
       });
     }
+    const { isLate, lateBy, isHalfDay } = shiftEval;
 
     // ── 6. Already checked in? ────────────────────────────────────────
     const existingAttendance = await Attendance.findOne({
       employee: req.user.id,
-      date: today,
+      date: { $gte: todayStart, $lt: tomorrowStart },
     });
 
     if (existingAttendance?.checkIn?.time) {
@@ -261,13 +314,6 @@ exports.checkIn = async (req, res) => {
     }
 
     // ── 7. Record check-in ────────────────────────────────────────────
-    const checkInTime = getISTDate();
-    const standardTime = getISTStandardTime();
-    const isLate = checkInTime > standardTime;
-    const lateBy = isLate
-      ? Math.round((checkInTime - standardTime) / (1000 * 60))
-      : 0;
-
     const punchPayload = {
       time: checkInTime,
       location: hasCoords
@@ -296,25 +342,31 @@ exports.checkIn = async (req, res) => {
       faceLivenessPassed: requiresFace,
     };
 
+    const status = isHalfDay ? 'half-day' : 'present';
+
     let attendance;
     if (existingAttendance) {
       existingAttendance.checkIn = punchPayload;
-      existingAttendance.status = 'present';
+      existingAttendance.status = status;
       existingAttendance.isLate = isLate;
       existingAttendance.lateBy = lateBy;
+      existingAttendance.shift = shiftDoc?._id ?? null;
+      existingAttendance.shiftSnapshot = snap;
       attendance = await existingAttendance.save();
     } else {
       attendance = await Attendance.create({
         employee: req.user.id,
-        date: today,
+        date: todayStart,                 // store normalized start of IST day
         checkIn: punchPayload,
-        status: 'present',
+        status,
         isLate,
         lateBy,
+        shift: shiftDoc?._id ?? null,
+        shiftSnapshot: snap,
       });
     }
 
-    // ── 8. Mark Combo Off as earned (only for weekend/mandatory holidays) ──
+    // ── 8. Mark Combo Off as earned ───────────────────────────────────
     if (comboOff) {
       comboOff.status = 'earned';
       comboOff.earnedOn = new Date();
@@ -327,12 +379,11 @@ exports.checkIn = async (req, res) => {
         await RestrictedHolidayUsage.create({
           employee: req.user.id,
           holiday: holiday._id,
-          date: today,
-          year: new Date(today).getFullYear(),
+          date: todayStart,
+          year: moment(todayStart).tz(TZ).year(),
           action: 'punched_in',
         });
       } catch (err) {
-        // Duplicate key → already recorded; ignore
         if (err.code !== 11000) {
           console.error('Failed to record restricted holiday usage:', err);
         }
@@ -344,7 +395,7 @@ exports.checkIn = async (req, res) => {
     if (isRestrictedHoliday && holiday) {
       const usedCount = await RestrictedHolidayUsage.countDocuments({
         employee: req.user.id,
-        year: new Date(today).getFullYear(),
+        year: moment(todayStart).tz(TZ).year(),
       });
       responseExtras.restrictedHoliday = {
         holidayName: holiday.name,
@@ -362,6 +413,12 @@ exports.checkIn = async (req, res) => {
       checkInTime: formatISTTime(checkInTime),
       isLate,
       lateBy,
+      isHalfDay,
+      shift: {
+        name: snap.name,
+        code: snap.code,
+        timing: `${snap.startTime} - ${snap.endTime}`,
+      },
       verification: {
         method: verification.method,
         bypassed: verification.bypass,
@@ -381,7 +438,9 @@ exports.checkIn = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK-OUT
+// ─────────────────────────────────────────────────────────────────────────────
 exports.checkOut = async (req, res) => {
   try {
     const { latitude, longitude, address, deviceInfo, faceEmbedding } = req.body;
@@ -471,12 +530,27 @@ exports.checkOut = async (req, res) => {
       }
     }
 
-    // ── 3. Load attendance ────────────────────────────────────────────
-    const today = getISTMidnight();
-    const attendance = await Attendance.findOne({
+    // ── 3. Load attendance (today, or yesterday's open night shift) ───
+    const nowIST = moment(getISTDate()).tz(TZ);
+
+    const todayStart = nowIST.clone().startOf('day').toDate();
+    const tomorrowStart = nowIST.clone().add(1, 'day').startOf('day').toDate();
+    const yesterdayStart = nowIST.clone().subtract(1, 'day').startOf('day').toDate();
+
+    let attendance = await Attendance.findOne({
       employee: req.user.id,
-      date: today,
+      date: { $gte: todayStart, $lt: tomorrowStart },
     });
+
+    if (!attendance?.checkIn?.time) {
+      const prev = await Attendance.findOne({
+        employee: req.user.id,
+        date: { $gte: yesterdayStart, $lt: todayStart },
+        'checkIn.time': { $ne: null },
+        'checkOut.time': null,
+      });
+      if (prev?.shiftSnapshot?.isNightShift) attendance = prev;
+    }
 
     if (!attendance || !attendance.checkIn?.time) {
       return res
@@ -490,9 +564,15 @@ exports.checkOut = async (req, res) => {
         .json({ success: false, message: 'Already checked out today' });
     }
 
+    // Normalize attendance day boundaries (IST)
+    const dayStart = moment(attendance.date).tz(TZ).startOf('day').toDate();
+    const dayEnd = moment(dayStart).tz(TZ).add(1, 'day').toDate();
+
+    const snap = snapFromAttendance(attendance);
+
     let checkOutTime = getISTDate();
-    const checkInIST = moment(attendance.checkIn.time).tz('Asia/Kolkata');
-    const checkOutIST = moment(checkOutTime).tz('Asia/Kolkata');
+    const checkInIST = moment(attendance.checkIn.time).tz(TZ);
+    const checkOutIST = moment(checkOutTime).tz(TZ);
 
     if (checkOutIST.isBefore(checkInIST)) {
       return res.status(400).json({
@@ -501,22 +581,26 @@ exports.checkOut = async (req, res) => {
       });
     }
 
-    // Cap at end of day IST
-    const endOfDayIST = moment.tz(today, 'Asia/Kolkata').endOf('day');
-    const missedCheckout = checkOutIST.isAfter(endOfDayIST);
-    if (missedCheckout) {
-      checkOutTime = endOfDayIST.toDate();
-    }
+    // ── 3b. Leave check (OPTIONAL — uncomment if policy requires) ─────
+    // const leave = await Leave.findOne({
+    //   employee: req.user.id,
+    //   status: 'approved',
+    //   leaveDuration: 'full',
+    //   startDate: { $lt: dayEnd },
+    //   endDate:   { $gte: dayStart },
+    // });
+    // if (leave) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: `Cannot check out, you are on approved ${leave.leaveType} leave`,
+    //   });
+    // }
 
-    // ── 4. Short attendance ───────────────────────────────────────────
-    const standardCheckOutIST = moment(getISTStandardCheckoutTime()).tz(
-      'Asia/Kolkata'
-    );
-    const finalCheckoutIST = moment(checkOutTime).tz('Asia/Kolkata');
-    const isShort = finalCheckoutIST.isBefore(standardCheckOutIST);
-    const shortByMinutes = isShort
-      ? standardCheckOutIST.diff(finalCheckoutIST, 'minutes')
-      : 0;
+    // ── 4. Missed-checkout cap + short attendance (shift based) ───────
+    const out = evaluateCheckOut(snap, attendance.date, checkOutIST);
+    checkOutTime = out.checkOutTime;
+    const { missedCheckout, isShort, shortByMinutes } = out;
+    const finalCheckoutIST = moment(checkOutTime).tz(TZ);
 
     // ── 5. Record checkout ────────────────────────────────────────────
     attendance.checkOut = {
@@ -562,13 +646,13 @@ exports.checkOut = async (req, res) => {
     let restrictedHolidayInfo = null;
     try {
       const holiday = await Holiday.findOne({
-        date: { $gte: today, $lt: new Date(today.getTime() + 86400000) },
+        date: { $gte: dayStart, $lt: dayEnd },
         isActive: true,
         category: 'Restricted',
       });
 
       if (holiday) {
-        const currentYear = new Date(today).getFullYear();
+        const currentYear = moment(attendance.date).tz(TZ).year();
         const quota =
           holiday.maxAllowed && holiday.maxAllowed > 0
             ? holiday.maxAllowed
@@ -593,7 +677,7 @@ exports.checkOut = async (req, res) => {
     res.status(200).json({
       success: true,
       message: missedCheckout
-        ? `Checked out at 23:59 (auto). Work hours: ${workHours}`
+        ? `Checked out at ${finalCheckoutIST.format('HH:mm')} (auto). Work hours: ${workHours}`
         : isShort
           ? `Checked out – short by ${shortByMinutes} min. Work hours: ${workHours}`
           : `Checked out – full day. Work hours: ${workHours}`,
@@ -602,6 +686,11 @@ exports.checkOut = async (req, res) => {
       isShortAttendance: isShort,
       shortByMinutes,
       missedCheckout,
+      shift: {
+        name: snap.name,
+        code: snap.code,
+        timing: `${snap.startTime} - ${snap.endTime}`,
+      },
       verification: {
         method: verification.method,
         bypassed: verification.bypass,
@@ -2687,45 +2776,57 @@ exports.getWorkHoursChartMonthly = async (req, res) => {
 // @access  Private (hr, superadmin)
 exports.exportMonthlyAttendanceExcel = async (req, res) => {
   try {
-    const { month, year, format = 'xlsx', department } = req.query;
+    const { month, year, format = "xlsx", department } = req.query;
 
-    const now = moment().tz('Asia/Kolkata');
-    const selectedMonth = month ? parseInt(month) : now.month() + 1;
-    const selectedYear = year ? parseInt(year) : now.year();
+    // ── Resolve selected month/year ─────────────────────────────────────
+    const now = nowIST();
+    const today = now.clone().startOf("day"); // ✅ fixes `today is not defined`
 
-    if (selectedMonth < 1 || selectedMonth > 12) {
-      return res
-        .status(400)
-        .json({ success: false, message: 'Invalid month' });
+    const selectedMonth = month ? parseInt(month, 10) : now.month() + 1;
+    const selectedYear = year ? parseInt(year, 10) : now.year();
+
+    if (
+      !Number.isInteger(selectedMonth) ||
+      selectedMonth < 1 ||
+      selectedMonth > 12
+    ) {
+      return res.status(400).json({ success: false, message: "Invalid month" });
+    }
+    if (!Number.isInteger(selectedYear) || selectedYear < 1970) {
+      return res.status(400).json({ success: false, message: "Invalid year" });
     }
 
-    const startDate = moment
-      .tz(
-        { year: selectedYear, month: selectedMonth - 1, day: 1 },
-        'Asia/Kolkata'
-      )
-      .startOf('day');
-    const endDate = startDate.clone().endOf('month').endOf('day');
+    // ── Month boundaries (IST-aware) ────────────────────────────────────
+    const startDate = moment.tz(
+      getMonthStart(selectedYear, selectedMonth),
+      TIMEZONE
+    );
+    const endDate = moment.tz(
+      getMonthEnd(selectedYear, selectedMonth),
+      TIMEZONE
+    );
 
+    // ── Employees ───────────────────────────────────────────────────────
     const employeeQuery = {
       isActive: true,
-      role: { $nin: ['admin', 'superadmin'] },
+      role: { $nin: ["admin", "superadmin"] },
     };
     if (department) employeeQuery.department = department;
 
     const employees = await User.find(employeeQuery)
       .select(
-        'firstName lastName employeeId email department designation weekendType role dateOfJoining'
+        "firstName lastName employeeId email department designation weekendType role dateOfJoining"
       )
-      .populate('department', 'name')
+      .populate("department", "name")
       .lean();
 
     if (employees.length === 0) {
       return res
         .status(404)
-        .json({ success: false, message: 'No employees found' });
+        .json({ success: false, message: "No employees found" });
     }
 
+    // ── Fetch related data ──────────────────────────────────────────────
     const [attendances, holidays, comboOffs, leaves] = await Promise.all([
       Attendance.find({
         date: { $gte: startDate.toDate(), $lte: endDate.toDate() },
@@ -2736,276 +2837,290 @@ exports.exportMonthlyAttendanceExcel = async (req, res) => {
       }).lean(),
       ComboOff.find({
         date: { $gte: startDate.toDate(), $lte: endDate.toDate() },
-        status: { $in: ['approved', 'earned', 'used'] },
+        status: { $in: ["approved", "earned", "used"] },
       }).lean(),
       Leave.find({
         fromDate: { $lte: endDate.toDate() },
         toDate: { $gte: startDate.toDate() },
-        status: 'approved',
+        status: "approved",
       }).lean(),
     ]);
 
+    // ── Lookup maps ─────────────────────────────────────────────────────
+    // Store the full holiday object so we can read name + type + category.
     const holidayMap = new Map(
-      holidays.map((h) => [
-        moment(h.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
-        h.name,
-      ])
+      holidays.map((h) => [getISTDateString(h.date), h])
     );
+
     const comboOffMap = new Map(
       comboOffs.map((c) => [
-        c.employee.toString() +
-        '-' +
-        moment(c.date).tz('Asia/Kolkata').format('YYYY-MM-DD'),
+        c.employee.toString() + "-" + getISTDateString(c.date),
         true,
       ])
     );
 
     const leaveMap = new Map();
     leaves.forEach((leave) => {
-      let current = moment(leave.fromDate).tz('Asia/Kolkata').startOf('day');
-      const end = moment(leave.toDate).tz('Asia/Kolkata').startOf('day');
-      while (current.isSameOrBefore(end, 'day')) {
-        const key =
-          leave.employee.toString() +
-          '-' +
-          current.format('YYYY-MM-DD');
+      let current = moment(leave.fromDate).tz(TIMEZONE).startOf("day");
+      const end = moment(leave.toDate).tz(TIMEZONE).startOf("day");
+      while (current.isSameOrBefore(end, "day")) {
+        const key = leave.employee.toString() + "-" + current.format("YYYY-MM-DD");
         leaveMap.set(key, {
           type: leave.type || leave.leaveType,
-          duration: leave.leaveDuration || leave.duration || 'full',
+          duration: leave.leaveDuration || leave.duration || "full",
           halfDayType: leave.halfDayType,
         });
-        current.add(1, 'day');
+        current.add(1, "day");
       }
     });
 
     const attendanceMap = new Map();
     attendances.forEach((a) => {
-      const key =
-        a.employee.toString() +
-        '-' +
-        moment(a.date).tz('Asia/Kolkata').format('YYYY-MM-DD');
+      const key = a.employee.toString() + "-" + getISTDateString(a.date);
       attendanceMap.set(key, a);
     });
 
+    // ── Build rows ──────────────────────────────────────────────────────
     const rows = [];
 
     for (const emp of employees) {
-      const weekendType = emp.weekendType || 'sunday';
+      const weekendType = emp.weekendType || "sunday";
       const empDoj = emp.dateOfJoining
-        ? moment(emp.dateOfJoining).tz('Asia/Kolkata').startOf('day')
+        ? moment(emp.dateOfJoining).tz(TIMEZONE).startOf("day")
         : startDate.clone();
 
-      let present = 0,
-        absent = 0,
-        onLeave = 0,
-        halfDays = 0;
-      let lateCount = 0,
-        totalLateMins = 0,
-        shortCount = 0,
-        totalShortMins = 0;
-      let totalHours = 0,
-        overtimeHours = 0;
-      let firstCheckIn = null,
-        lastCheckOut = null;
-      let weeklyOffs = 0,
-        holidaysCount = 0,
-        comboOffUsed = 0;
+      let present = 0;
+      let absent = 0;
+      let onLeave = 0;
+      let halfDays = 0;
+      let lateCount = 0;
+      let totalLateMins = 0;
+      let shortCount = 0;
+      let totalShortMins = 0;
+      let totalHours = 0;
+      let overtimeHours = 0;
+      let firstCheckIn = null;
+      let lastCheckOut = null;
+      let weeklyOffs = 0;
+      let holidaysCount = 0;
+      let comboOffUsed = 0;
 
       let current = startDate.clone();
-      while (current.isSameOrBefore(endDate, 'day')) {
-        // ── Skip pre-joining days ──
-        if (current.isBefore(empDoj, 'day')) {
-          current.add(1, 'day');
+      while (current.isSameOrBefore(endDate, "day")) {
+        // Skip days before joining
+        if (current.isBefore(empDoj, "day")) {
+          current.add(1, "day");
           continue;
         }
 
-        const dateStr = current.format('YYYY-MM-DD');
-        const day = current.day();
-        const key = emp._id.toString() + '-' + dateStr;
+        const dateStr = current.format("YYYY-MM-DD");
+        const day = getISTDay(current.toDate());
+        const key = emp._id.toString() + "-" + dateStr;
 
         const isWeekend =
-          (weekendType === 'sunday' && day === 0) ||
-          (weekendType === 'saturday_sunday' &&
-            (day === 0 || day === 6));
-        const isHoliday = holidayMap.has(dateStr);
+          (weekendType === "sunday" && day === 0) ||
+          (weekendType === "saturday_sunday" && (day === 0 || day === 6));
+
+        const holiday = holidayMap.get(dateStr); // full object | undefined
+        const isHoliday = !!holiday;
         const isComboOff = comboOffMap.has(key);
         const leaveData = leaveMap.get(key);
         const record = attendanceMap.get(key);
 
+        // Counters for non-working contexts
         if (isWeekend) weeklyOffs++;
         if (isHoliday) holidaysCount++;
         if (isComboOff) comboOffUsed++;
 
+        const hasRealPunch = !!record?.checkIn?.time;
+
         if (isComboOff || isHoliday || isWeekend) {
-          // Skip (non-working context)
+          // Real punch on an off/holiday/combo day → counts as present (worked).
+          if (hasRealPunch) {
+            present++;
+            const workHours = record.checkOut?.time
+              ? computeWorkHours(record.checkIn.time, record.checkOut.time)
+              : getCurrentWorkHours(record);
+            totalHours += workHours;
+
+            const inT = moment(record.checkIn.time).tz(TIMEZONE);
+            if (!firstCheckIn || inT.isBefore(firstCheckIn)) {
+              firstCheckIn = inT.toDate();
+            }
+            if (record.checkOut?.time) {
+              const outT = moment(record.checkOut.time).tz(TIMEZONE);
+              if (!lastCheckOut || outT.isAfter(lastCheckOut)) {
+                lastCheckOut = outT.toDate();
+              }
+            }
+          }
         } else if (leaveData) {
-          if (leaveData.duration === 'half') {
+          if (leaveData.duration === "half") {
             onLeave += 0.5;
             halfDays++;
           } else {
             onLeave += 1;
           }
-        } else if (record && record.checkIn?.time) {
-          // ✅ Only a real punch wins over holiday/weekend
-          const isToday = current.isSame(today, 'day');
+        } else if (hasRealPunch) {
+          // Normal working day, real punch
+          present++;
 
-          let workHours = record.workHours || 0;
+          const isToday = current.isSame(today, "day");
+
+          let workHours = Number(record.workHours || 0);
           if (isToday) {
             workHours = getCurrentWorkHours(record);
           } else if (record.checkIn?.time && record.checkOut?.time) {
             workHours = computeWorkHours(record.checkIn.time, record.checkOut.time);
           }
+          totalHours += workHours;
 
-          const missedCheckout =
-            !isToday && !!record.checkIn?.time && !record.checkOut?.time;
+          // Late / short attendance — adjust field names to your schema
+          if (record.isLate) {
+            lateCount++;
+            totalLateMins += Number(record.lateBy || 0);
+          }
+          if (record.isShortAttendance) {
+            shortCount++;
+            totalShortMins += Number(record.shortByMinutes || 0);
+          }
+          if (record.overtimeHours) {
+            overtimeHours += Number(record.overtimeHours || 0);
+          }
 
-          const { _id, employee, createdAt, updatedAt, __v, ...cleanRecord } = record;
-
-          totalDays.push({
-            ...cleanRecord,
-            date: dateKey,
-            status: record.status || 'present',
-            workHours,
-            missedCheckout,
-            holidayName: holiday?.name || null,
-            holidayType: holiday?.type || null,
-            isRestrictedHoliday: holiday?.category === 'Restricted',
-            isWeeklyOffWork: isWeekend || false,
-            checkInTimeFormatted: record.checkIn?.time
-              ? formatISTTime(record.checkIn.time)
-              : null,
-            checkOutTimeFormatted: record.checkOut?.time
-              ? formatISTTime(record.checkOut.time)
-              : null,
-          });
+          const inT = moment(record.checkIn.time).tz(TIMEZONE);
+          if (!firstCheckIn || inT.isBefore(firstCheckIn)) {
+            firstCheckIn = inT.toDate();
+          }
+          if (record.checkOut?.time) {
+            const outT = moment(record.checkOut.time).tz(TIMEZONE);
+            if (!lastCheckOut || outT.isAfter(lastCheckOut)) {
+              lastCheckOut = outT.toDate();
+            }
+          }
         } else {
           absent++;
         }
-        current.add(1, 'day');
+
+        current.add(1, "day");
       }
 
       const workableDays = present + absent + onLeave;
       const attendancePercent =
         workableDays > 0
           ? (((present + halfDays * 0.5) / workableDays) * 100).toFixed(2)
-          : '0.00';
+          : "0.00";
 
       rows.push({
-        'Emp ID': emp.employeeId || '-',
-        'Employee Name': `${emp.firstName} ${emp.lastName}`.trim(),
-        Department: emp.department?.name || 'N/A',
-        Designation: emp.designation || 'N/A',
-        Email: emp.email,
-        Month: startDate.format('MMMM YYYY'),
-        'Total Days': startDate.daysInMonth(),
-        'Working Days': workableDays.toFixed(1),
+        "Emp ID": emp.employeeId || "-",
+        "Employee Name": `${emp.firstName || ""} ${emp.lastName || ""}`.trim(),
+        Department: emp.department?.name || "N/A",
+        Designation: emp.designation || "N/A",
+        Email: emp.email || "-",
+        Month: startDate.format("MMMM YYYY"),
+        "Total Days": startDate.daysInMonth(),
+        "Working Days": workableDays.toFixed(1),
         Present: present,
-        'Half Days': halfDays,
+        "Half Days": halfDays,
         Absent: absent,
-        'On Leave':
+        "On Leave":
           onLeave % 1 === 0 ? onLeave : parseFloat(onLeave.toFixed(1)),
-        'Weekly Offs': weeklyOffs,
+        "Weekly Offs": weeklyOffs,
         Holidays: holidaysCount,
-        'Combo Off Used': comboOffUsed,
-        'Late Arrivals': lateCount,
-        'Late By (Mins)': totalLateMins,
-        'Short Attendance': shortCount,
-        'Short By (Mins)': totalShortMins,
-        'Total Work Hours': totalHours.toFixed(2),
-        'Avg Hours/Present Day':
-          present > 0 ? (totalHours / present).toFixed(2) : '0.00',
-        'Overtime Hours': overtimeHours.toFixed(2),
-        'First Check-in': firstCheckIn
-          ? moment(firstCheckIn)
-            .tz('Asia/Kolkata')
-            .format('DD MMM, hh:mm A')
-          : '-',
-        'Last Check-out': lastCheckOut
-          ? moment(lastCheckOut)
-            .tz('Asia/Kolkata')
-            .format('DD MMM, hh:mm A')
-          : '-',
-        'Attendance %': attendancePercent + '%',
+        "Combo Off Used": comboOffUsed,
+        "Late Arrivals": lateCount,
+        "Late By (Mins)": totalLateMins,
+        "Short Attendance": shortCount,
+        "Short By (Mins)": totalShortMins,
+        "Total Work Hours": totalHours.toFixed(2),
+        "Avg Hours/Present Day":
+          present > 0 ? (totalHours / present).toFixed(2) : "0.00",
+        "Overtime Hours": overtimeHours.toFixed(2),
+        "First Check-in": firstCheckIn
+          ? moment(firstCheckIn).tz(TIMEZONE).format("DD MMM, hh:mm A")
+          : "-",
+        "Last Check-out": lastCheckOut
+          ? moment(lastCheckOut).tz(TIMEZONE).format("DD MMM, hh:mm A")
+          : "-",
+        "Attendance %": attendancePercent + "%",
       });
     }
 
-    rows.sort((a, b) => a['Employee Name'].localeCompare(b['Employee Name']));
+    rows.sort((a, b) => a["Employee Name"].localeCompare(b["Employee Name"]));
 
+    // ── Workbook ────────────────────────────────────────────────────────
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet(
-      `Attendance - ${startDate.format('MMM YYYY')}`
+      `Attendance - ${startDate.format("MMM YYYY")}`
     );
 
-    worksheet.columns = Object.keys(rows[0]).map((key) => ({
+    const headers = Object.keys(rows[0]);
+    const colCount = headers.length;
+    const wideCols = ["Employee Name", "Email", "First Check-in", "Last Check-out"];
+
+    // Define columns with keys FIRST — rows are then added by key, not by position
+    worksheet.columns = headers.map((key) => ({
       header: key,
       key,
-      width: [
-        'Employee Name',
-        'Email',
-        'First Check-in',
-        'Last Check-out',
-      ].includes(key)
-        ? 28
-        : 18,
+      width: wideCols.includes(key) ? 28 : 18,
     }));
 
-    worksheet.addRows(rows);
+    // ── Row 1: Title (merged across all columns) ────────────────────────
+    worksheet.insertRow(1, []); // push auto-generated header down to row 2
+    worksheet.mergeCells(1, 1, 1, colCount);
+    const titleCell = worksheet.getCell(1, 1);
+    titleCell.value = `Monthly Attendance Report - ${startDate.format("MMMM YYYY")}`;
+    titleCell.font = { bold: true, size: 18, color: { argb: "FF1E40AF" } };
+    titleCell.alignment = { horizontal: "center", vertical: "middle" };
+    worksheet.getRow(1).height = 32;
 
-    const headerRow = worksheet.getRow(1);
-    headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    headerRow.fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FF1E40AF' },
-    };
-    headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+    // ── Row 2: Style the auto-generated header row (from `worksheet.columns`) ──
+    const headerRow = worksheet.getRow(2);
+    headerRow.height = 24;
+    headerRow.eachCell({ includeEmpty: true }, (cell) => {
+      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FF1E40AF" },
+        bgColor: { argb: "FF1E40AF" }, // explicit bgColor avoids blank-fill rendering in some viewers
+      };
+      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+      cell.border = {
+        top: { style: "thin", color: { argb: "FF1E40AF" } },
+        left: { style: "thin", color: { argb: "FF1E40AF" } },
+        bottom: { style: "thin", color: { argb: "FF1E40AF" } },
+        right: { style: "thin", color: { argb: "FF1E40AF" } },
+      };
+    });
 
-    worksheet.mergeCells(
-      'A1:' +
-      String.fromCharCode(64 + worksheet.columns.length) +
-      '1'
-    );
-    const titleCell = worksheet.getCell('A1');
-    titleCell.value = `Monthly Attendance Report - ${startDate.format(
-      'MMMM YYYY'
-    )}`;
-    titleCell.font = {
-      bold: true,
-      size: 18,
-      color: { argb: 'FF1E40AF' },
-    };
-    titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    // ── Rows 3+: Data — add by KEY, matching worksheet.columns ──────────
+    rows.forEach((row) => {
+      worksheet.addRow(row); // object keyed by header name — safe regardless of header order
+    });
 
-    worksheet.spliceRows(2, 0, []);
-    worksheet.getRow(3).values = worksheet.columns.map((c) => c.header);
-    worksheet.getRow(3).font = { bold: true };
-    worksheet.getRow(3).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFF3F4F6' },
-    };
-
-    const fileName = `Attendance_Report_${selectedMonth}_${selectedYear}.${format === 'csv' ? 'csv' : 'xlsx'
+    // Freeze title + header rows
+    worksheet.views = [{ state: "frozen", ySplit: 2 }];
+    // ── Output ──────────────────────────────────────────────────────────
+    const fileName = `Attendance_Report_${selectedMonth}_${selectedYear}.${format === "csv" ? "csv" : "xlsx"
       }`;
-    res.setHeader(
-      'Content-Type',
-      format === 'csv'
-        ? 'text/csv'
-        : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    );
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${fileName}"`
-    );
 
-    if (format === 'csv') {
+    res.setHeader(
+      "Content-Type",
+      format === "csv"
+        ? "text/csv"
+        : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+    if (format === "csv") {
       await workbook.csv.write(res);
     } else {
       await workbook.xlsx.write(res);
     }
     res.end();
   } catch (error) {
-    console.error('Export Error:', error);
+    console.error("Export Error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

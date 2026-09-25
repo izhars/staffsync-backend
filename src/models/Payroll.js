@@ -13,6 +13,9 @@ const payrollSchema = new mongoose.Schema({
     basicSalary: { type: Number, required: true, default: 0 },
     hra: { type: Number, default: 0 },
     transport: { type: Number, default: 0 },
+    medical: { type: Number, default: 0 },
+    conveyance: { type: Number, default: 0 },
+    specialAllowance: { type: Number, default: 0 },
     bonus: { type: Number, default: 0 },
     overtime: { type: Number, default: 0 },
     other: { type: Number, default: 0 },
@@ -22,6 +25,7 @@ const payrollSchema = new mongoose.Schema({
   deductions: {
     pf: { type: Number, default: 0 },
     tax: { type: Number, default: 0 },
+    pt: { type: Number, default: 0 },          // Professional Tax
     insurance: { type: Number, default: 0 },
     advance: { type: Number, default: 0 },
     other: { type: Number, default: 0 },
@@ -29,11 +33,14 @@ const payrollSchema = new mongoose.Schema({
   },
 
   attendance: {
-    workDays: { type: Number, required: true },
+    workDays: { type: Number, default: 0 },
     presentDays: { type: Number, default: 0 },
     absentDays: { type: Number, default: 0 },
     leaveDays: { type: Number, default: 0 },
-    halfDays: { type: Number, default: 0 }
+    halfDays: { type: Number, default: 0 },
+    offDays: { type: Number, default: 0 },
+    publicHolidays: { type: Number, default: 0 },
+    payableDays: { type: Number, default: 0 }
   },
 
   netSalary: { type: Number, required: true, default: 0 },
@@ -57,24 +64,71 @@ const payrollSchema = new mongoose.Schema({
 // Unique payroll per employee per month/year
 payrollSchema.index({ employee: 1, month: 1, year: 1 }, { unique: true });
 
-// Auto-calculate totals before save
-payrollSchema.pre('save', function(next) {
-  const earnings = this.earnings;
-  const deductions = this.deductions;
+// ─────────────────────────────────────────────
+// Shared recalculation logic
+// ─────────────────────────────────────────────
+function recalc(doc) {
+  const e = doc.earnings || {};
+  const d = doc.deductions || {};
 
-  earnings.total = earnings.basicSalary + earnings.hra + earnings.transport +
-                   earnings.bonus + earnings.overtime + earnings.other;
+  e.total =
+    (e.basicSalary || 0) +
+    (e.hra || 0) +
+    (e.transport || 0) +
+    (e.medical || 0) +
+    (e.conveyance || 0) +
+    (e.specialAllowance || 0) +
+    (e.bonus || 0) +
+    (e.overtime || 0) +
+    (e.other || 0);
 
-  deductions.total = deductions.pf + deductions.tax + deductions.insurance +
-                     deductions.advance + deductions.other;
+  d.total =
+    (d.pf || 0) +
+    (d.tax || 0) +
+    (d.pt || 0) +
+    (d.insurance || 0) +
+    (d.advance || 0) +
+    (d.other || 0);
 
-  this.netSalary = earnings.total - deductions.total;
+  doc.earnings.total = round2(e.total);
+  doc.deductions.total = round2(d.total);
+  doc.netSalary = round2(e.total - d.total);
+}
 
+function round2(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+// Instance method (useful for controller-level recalcs)
+payrollSchema.methods.recalculate = function () {
+  recalc(this);
+  return this;
+};
+
+// Runs on .save()
+payrollSchema.pre('save', function (next) {
+  recalc(this);
   next();
 });
 
-// Virtual: Gross Salary (before deductions)
-payrollSchema.virtual('grossSalary').get(function() {
+// Runs on findOneAndUpdate / findByIdAndUpdate
+payrollSchema.pre('findOneAndUpdate', function (next) {
+  const update = this.getUpdate() || {};
+  // Only recalc if earnings or deductions are being touched
+  if (update.earnings || update.deductions || update.$set?.earnings || update.$set?.deductions) {
+    this._recalcAfterUpdate = true;
+  }
+  next();
+});
+
+payrollSchema.post('findOneAndUpdate', async function (doc) {
+  if (this._recalcAfterUpdate && doc) {
+    recalc(doc);
+    await doc.save(); // triggers pre('save') again — safe & idempotent
+  }
+});
+
+payrollSchema.virtual('grossSalary').get(function () {
   return this.earnings.total;
 });
 

@@ -15,7 +15,6 @@ const isValidComboOffDate = async (date, user) => {
     (weekendType === "sunday" && day === 0) ||
     (weekendType === "saturday_sunday" && (day === 0 || day === 6));
 
-  // Check holiday
   const holiday = await Holiday.findOne({
     date: { $gte: mDate.toDate(), $lte: mDate.endOf("day").toDate() },
     isActive: true,
@@ -24,7 +23,9 @@ const isValidComboOffDate = async (date, user) => {
   return isWeekend || !!holiday;
 };
 
+// ─────────────────────────────────────────────────────────────
 // Step 1 — Employee applies for Combo Off
+// ─────────────────────────────────────────────────────────────
 exports.applyComboOff = async (req, res) => {
   try {
     const employeeId = req.user.id;
@@ -39,11 +40,30 @@ exports.applyComboOff = async (req, res) => {
 
     const date = moment.tz(workDate, "Asia/Kolkata").startOf("day").toDate();
 
-    const user = await User.findById(employeeId).select("weekendType");
+    // ── Fetch user with probation fields ──
+    const user = await User.findById(employeeId).select(
+      "weekendType probationEndDate isProbationCompleted isActive status"
+    );
     if (!user) {
       return res.status(404).json({ success: false, message: "User not found" });
     }
 
+    // ── NEW: Block combo off during probation ──
+    const today = new Date();
+    const onProbation =
+      !user.isProbationCompleted &&
+      user.probationEndDate &&
+      today < new Date(user.probationEndDate);
+
+    if (onProbation) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "You are on probation. Combo Off is not allowed until your 6-month probation completes.",
+      });
+    }
+
+    // ── Validate date is weekend/holiday ──
     const isValid = await isValidComboOffDate(date, user);
     if (!isValid) {
       return res.status(400).json({
@@ -52,6 +72,7 @@ exports.applyComboOff = async (req, res) => {
       });
     }
 
+    // ── Prevent duplicates ──
     const existing = await ComboOff.findOne({
       employee: employeeId,
       workDate: date,
@@ -82,7 +103,9 @@ exports.applyComboOff = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────
 // Step 2 — HR approves or rejects Combo Off
+// ─────────────────────────────────────────────────────────────
 exports.reviewComboOff = async (req, res) => {
   try {
     const { comboOffId } = req.params;
@@ -109,10 +132,10 @@ exports.reviewComboOff = async (req, res) => {
       comboOff.approvedBy = req.user.id;
       comboOff.isCredited = true;
 
-      await User.findByIdAndUpdate(
-        comboOff.employee,
-        { $inc: { "leaveBalance.combo": 1 } }
-      );
+      // Credit combo balance
+      await User.findByIdAndUpdate(comboOff.employee, {
+        $inc: { "leaveBalance.combo": 1 },
+      });
     } else {
       comboOff.status = "rejected";
       comboOff.approvedBy = req.user.id;
@@ -131,7 +154,9 @@ exports.reviewComboOff = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────
 // Step 3 — Get all combo offs (HR/Admin)
+// ─────────────────────────────────────────────────────────────
 exports.getAllComboOffs = async (req, res) => {
   try {
     const { status } = req.query;
@@ -153,7 +178,9 @@ exports.getAllComboOffs = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────
 // Step 4 — Get my combo offs (Employee)
+// ─────────────────────────────────────────────────────────────
 exports.getMyComboOffs = async (req, res) => {
   try {
     const comboOffs = await ComboOff.find({ employee: req.user.id }).sort({
@@ -170,7 +197,9 @@ exports.getMyComboOffs = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────
 // Step 5 — Get single combo off by ID
+// ─────────────────────────────────────────────────────────────
 exports.getComboOffById = async (req, res) => {
   try {
     const comboOff = await ComboOff.findById(req.params.id)
@@ -188,7 +217,9 @@ exports.getComboOffById = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────
 // Step 6 — Delete combo off (Employee only, pending status)
+// ─────────────────────────────────────────────────────────────
 exports.deleteComboOff = async (req, res) => {
   try {
     const comboOff = await ComboOff.findById(req.params.id);
@@ -223,7 +254,9 @@ exports.deleteComboOff = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────
 // Step 7 — Monthly Combo Off Summary (HR/Admin)
+// ─────────────────────────────────────────────────────────────
 exports.getMonthlyComboOffSummary = async (req, res) => {
   try {
     const { month, year } = req.query;
@@ -238,41 +271,19 @@ exports.getMonthlyComboOffSummary = async (req, res) => {
     const monthNumber = Number(month);
     const yearNumber = Number(year);
 
-    if (
-      !Number.isInteger(monthNumber) ||
-      monthNumber < 1 ||
-      monthNumber > 12
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Month must be between 1 and 12",
-      });
+    if (!Number.isInteger(monthNumber) || monthNumber < 1 || monthNumber > 12) {
+      return res.status(400).json({ success: false, message: "Month must be between 1 and 12" });
     }
 
-    if (
-      !Number.isInteger(yearNumber) ||
-      yearNumber < 2000 ||
-      yearNumber > 2100
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid year",
-      });
+    if (!Number.isInteger(yearNumber) || yearNumber < 2000 || yearNumber > 2100) {
+      return res.status(400).json({ success: false, message: "Invalid year" });
     }
 
     const formattedMonth = String(monthNumber).padStart(2, "0");
-
-    const startDate = moment.tz(
-      `${yearNumber}-${formattedMonth}-01`,
-      "YYYY-MM-DD",
-      true
-    );
+    const startDate = moment.tz(`${yearNumber}-${formattedMonth}-01`, "YYYY-MM-DD", true);
 
     if (!startDate.isValid()) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid month/year",
-      });
+      return res.status(400).json({ success: false, message: "Invalid month/year" });
     }
 
     const endDate = startDate.clone().endOf("month");
@@ -281,18 +292,10 @@ exports.getMonthlyComboOffSummary = async (req, res) => {
       {
         $match: {
           status: "approved",
-          workDate: {
-            $gte: startDate.toDate(),
-            $lte: endDate.toDate(),
-          },
+          workDate: { $gte: startDate.toDate(), $lte: endDate.toDate() },
         },
       },
-      {
-        $group: {
-          _id: "$employee",
-          totalApproved: { $sum: 1 },
-        },
-      },
+      { $group: { _id: "$employee", totalApproved: { $sum: 1 } } },
       {
         $lookup: {
           from: "users",
@@ -301,29 +304,17 @@ exports.getMonthlyComboOffSummary = async (req, res) => {
           as: "employee",
         },
       },
-      {
-        $unwind: "$employee",
-      },
+      { $unwind: "$employee" },
       {
         $project: {
           _id: 0,
           employeeId: "$employee._id",
-          name: {
-            $concat: [
-              "$employee.firstName",
-              " ",
-              "$employee.lastName",
-            ],
-          },
+          name: { $concat: ["$employee.firstName", " ", "$employee.lastName"] },
           email: "$employee.email",
           totalApproved: 1,
         },
       },
-      {
-        $sort: {
-          name: 1,
-        },
-      },
+      { $sort: { name: 1 } },
     ]);
 
     return res.status(200).json({
@@ -335,43 +326,47 @@ exports.getMonthlyComboOffSummary = async (req, res) => {
     });
   } catch (error) {
     console.error("🔥 Error fetching monthly summary:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-    });
+    return res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
+// ─────────────────────────────────────────────────────────────
+// Step 8 — Get Combo Off balance (Employee)
+// ─────────────────────────────────────────────────────────────
 exports.getComboOffBalance = async (req, res) => {
   try {
     const employeeId = req.user.id;
-    
+
     const user = await User.findById(employeeId).select("leaveBalance");
-    
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
     const currentYear = moment().year();
     const yearStart = moment(`${currentYear}-01-01`).toDate();
     const yearEnd = moment(`${currentYear}-12-31`).toDate();
-    
-    const usedThisYear = await ComboOff.countDocuments({
+
+    // Used = approved combo leaves (via Leave model)
+    const Leave = require("../models/Leave");
+    const usedThisYear = await Leave.countDocuments({
       employee: employeeId,
+      leaveType: "combo",
       status: "approved",
-      workDate: { $gte: yearStart, $lte: yearEnd }
+      startDate: { $gte: yearStart, $lte: yearEnd },
     });
-    
+
     const pendingCount = await ComboOff.countDocuments({
       employee: employeeId,
-      status: "pending"
+      status: "pending",
     });
-    
+
     res.status(200).json({
       success: true,
       balance: {
         available: user.leaveBalance?.combo || 0,
         usedThisYear,
         pending: pendingCount,
-        remaining: (user.leaveBalance?.combo || 0) - usedThisYear
-      }
+      },
     });
   } catch (error) {
     console.error("🔥 Error fetching balance:", error);
